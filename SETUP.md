@@ -54,6 +54,7 @@ git push -u origin main
    - `TELEGRAM_BOT_TOKEN` — from step 1
    - `TELEGRAM_OWNER_CHAT_ID` — from step 2
    - `TELEGRAM_WEBHOOK_SECRET` — random string (e.g. `openssl rand -hex 32`)
+   - `REVENUECAT_SECRET_API_KEY` — RC dashboard → Project settings → API keys → New secret API key (label `attribution-gateway`). Used by `POST /api/v1/attribution/fetch/`.
 4. Deploy. Railway will run `python manage.py migrate` (release phase) then `gunicorn config.wsgi`.
 5. Verify health: `curl https://your-app.up.railway.app/api/v1/health/` → `{"status":"ok"}`.
 

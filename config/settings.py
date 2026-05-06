@@ -29,6 +29,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'corsheaders',
     'chat',
+    'attribution',
 ]
 
 MIDDLEWARE = [
@@ -113,6 +114,11 @@ REST_FRAMEWORK = {
 TELEGRAM_BOT_TOKEN = env('TELEGRAM_BOT_TOKEN', default='')
 TELEGRAM_OWNER_CHAT_ID = env('TELEGRAM_OWNER_CHAT_ID', default='')
 TELEGRAM_WEBHOOK_SECRET = env('TELEGRAM_WEBHOOK_SECRET', default='')
+
+# RevenueCat REST API — secret key, used by the attribution gateway.
+# Read-only access to subscriber data. Get from RC dashboard:
+# Project settings → API keys → New secret API key.
+REVENUECAT_SECRET_API_KEY = env('REVENUECAT_SECRET_API_KEY', default='')
 
 # Logging
 LOGGING = {
