@@ -4,32 +4,50 @@ import re
 import requests
 from django.conf import settings
 
+from chat.pseudonym import language_to_flag, uuid_to_pseudonym
+
 logger = logging.getLogger(__name__)
 
 TELEGRAM_API_BASE = 'https://api.telegram.org/bot{token}/{method}'
 SEND_TIMEOUT = 10
 
-# Regex for extracting user UUID from a forwarded message that the founder replies to.
-# Matches the line "👤 USER: <uuid>" — UUID is alphanumeric with optional dashes/underscores.
-USER_UUID_RE = re.compile(r'👤\s*USER:\s*([A-Za-z0-9_-]+)')
+# Extracts the user UUID from a message Cyril is replying to. Matches both
+# the legacy `👤 USER: <uuid>` header and the current `🆔 <uuid>` line so
+# replies to old messages already sitting in the Telegram chat from before
+# the format migration keep working. UUID is the canonical Apple
+# `UUID().uuidString` shape (8-4-4-4-12 hex with hyphens, case-insensitive).
+USER_UUID_RE = re.compile(r'(?:🆔|👤\s*USER:)\s*([A-F0-9-]{36})', re.IGNORECASE)
 
 
 def format_inbound_for_telegram(user_uuid: str, text: str, metadata: dict, email: str | None) -> str:
-    """Build the Telegram-bound text for a user's inbound message."""
+    """Build the Telegram-bound text for a user's inbound message.
+
+    Header layout:
+        🐼 Curious Panda 🇺🇸 · v1.4.2
+        💳 subscribed · 0 recordings · en-US
+        ✉️ user@example.com    (only if email present)
+        🆔 <full-uuid>
+        —————
+        <message text>
+
+    The leading 🐼 is fixed (not derived from the animal) so Cyril can
+    visually anchor on every chat row regardless of which animal the
+    pseudonym hashed to. The full UUID stays in the 🆔 line so the reply
+    parser keeps working.
+    """
     metadata = metadata or {}
+    pseudonym = uuid_to_pseudonym(user_uuid)
+    flag = language_to_flag(metadata.get('language', ''))
 
-    lines = [f"👤 USER: {user_uuid}"]
-
-    device_parts = []
+    # Line 1: pseudonym + flag, optionally followed by app version.
+    line1 = f"🐼 {pseudonym} {flag}"
     if metadata.get('app_version'):
-        device_parts.append(f"v{metadata['app_version']}")
-    if metadata.get('ios_version'):
-        device_parts.append(f"iOS {metadata['ios_version']}")
-    if metadata.get('device_model'):
-        device_parts.append(metadata['device_model'])
-    if device_parts:
-        lines.append('📱 ' + ' · '.join(device_parts))
+        line1 += f" · v{metadata['app_version']}"
 
+    lines = [line1]
+
+    # Line 2: subscription / recordings / language. Skip entirely if no
+    # data points are available (preserves the existing defensive style).
     status_parts = []
     if metadata.get('subscription_status'):
         status_parts.append(metadata['subscription_status'])
@@ -43,9 +61,8 @@ def format_inbound_for_telegram(user_uuid: str, text: str, metadata: dict, email
     if email:
         lines.append(f"✉️ {email}")
 
-    lines.append('')
+    lines.append(f"🆔 {user_uuid}")
     lines.append('—————')
-    lines.append('')
     lines.append(text)
 
     return '\n'.join(lines)
