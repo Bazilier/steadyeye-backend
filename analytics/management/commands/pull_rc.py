@@ -76,8 +76,18 @@ class Command(BaseCommand):
             help='Comma-separated list of specific app_user_ids to pull. If omitted, '
                  'pulls all known app_user_ids from RcEvent table.',
         )
+        # --days is accepted purely for compatibility with the `pull_all`
+        # command, which passes --days to every sub-command. RC snapshots
+        # are point-in-time, so the value is ignored here.
+        parser.add_argument(
+            '--days',
+            type=int,
+            default=1,
+            help='Ignored. Accepted only for compatibility with pull_all.',
+        )
 
     def handle(self, *args, **options):
+        # --days is intentionally ignored — RC snapshots are point-in-time.
         # 1. Parse target date (default: today UTC).
         date_arg = options.get('date')
         if date_arg:
