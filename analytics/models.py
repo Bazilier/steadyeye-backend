@@ -3,7 +3,7 @@ from django.db import models
 
 class AsaDailyMetrics(models.Model):
     """Apple Search Ads metrics, one row per
-    day × campaign × country × search_term × keyword × match_type."""
+    day × level × campaign × country × search_term × keyword × match_type."""
 
     MATCH_TYPE_CHOICES = [
         ('EXACT', 'Exact'),
@@ -11,16 +11,32 @@ class AsaDailyMetrics(models.Model):
         ('SEARCH_MATCH', 'Search Match'),
     ]
 
+    LEVEL_CHOICES = [
+        ('campaign', 'Campaign'),
+        ('ad_group', 'Ad Group'),
+        ('keyword', 'Keyword'),
+        ('search_term', 'Search Term'),
+    ]
+
     date = models.DateField()
+    level = models.CharField(max_length=20, choices=LEVEL_CHOICES)
     campaign_name = models.CharField(max_length=200)
     country = models.CharField(max_length=2)
     search_term = models.CharField(max_length=500, blank=True)
-    keyword = models.CharField(max_length=200)
-    match_type = models.CharField(max_length=20, choices=MATCH_TYPE_CHOICES)
+    keyword = models.CharField(max_length=200, blank=True)
+    match_type = models.CharField(max_length=20, choices=MATCH_TYPE_CHOICES, blank=True)
     spend = models.DecimalField(max_digits=10, decimal_places=2)
     impressions = models.IntegerField(default=0)
     taps = models.IntegerField(default=0)
     installs = models.IntegerField(default=0)
+    installs_tap_through = models.IntegerField(default=0)
+    installs_view_through = models.IntegerField(default=0)
+    new_downloads_tap_through = models.IntegerField(default=0)
+    new_downloads_view_through = models.IntegerField(default=0)
+    new_downloads_total = models.IntegerField(default=0)
+    redownloads_tap_through = models.IntegerField(default=0)
+    redownloads_view_through = models.IntegerField(default=0)
+    redownloads_total = models.IntegerField(default=0)
     ttr = models.DecimalField(max_digits=5, decimal_places=4, null=True, blank=True)
     cpt = models.DecimalField(max_digits=10, decimal_places=4, null=True, blank=True)
     cpa = models.DecimalField(max_digits=10, decimal_places=4, null=True, blank=True)
@@ -29,11 +45,11 @@ class AsaDailyMetrics(models.Model):
     class Meta:
         ordering = ['-date']
         unique_together = (
-            ('date', 'campaign_name', 'country', 'search_term', 'keyword', 'match_type'),
+            ('date', 'level', 'campaign_name', 'country', 'search_term', 'keyword', 'match_type'),
         )
 
     def __str__(self):
-        return f"{self.date} {self.campaign_name} [{self.country}] {self.keyword}"
+        return f"{self.date} [{self.level}] {self.campaign_name} {self.keyword}"
 
 
 class RcSubscriptionSnapshot(models.Model):
