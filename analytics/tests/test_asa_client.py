@@ -45,6 +45,7 @@ def _resp(status_code, body):
     ASA_CLIENT_ID='SEARCHADS.client-abc',
     ASA_TEAM_ID='SEARCHADS.team-xyz',
     ASA_KEY_ID='key-id-001',
+    ASA_ORG_ID='20732690',
 )
 class AsaClientTests(TestCase):
 
@@ -77,6 +78,10 @@ class AsaClientTests(TestCase):
         self.assertEqual(token, 'tok-123')
         self.assertEqual(cache.get(ACCESS_TOKEN_CACHE_KEY), 'tok-123')
         self.assertEqual(mock_post.call_count, 1)
+
+        # The OAuth token exchange must NOT carry the X-AP-Context header.
+        oauth_headers = mock_post.call_args.kwargs.get('headers') or {}
+        self.assertNotIn('X-AP-Context', oauth_headers)
 
     def test_token_caching(self):
         client = AsaClient()
@@ -128,3 +133,20 @@ class AsaClientTests(TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]['metadata']['campaignName'], 'Brand US')
         self.assertEqual(rows[0]['granularity'][0]['impressions'], 100)
+
+    def test_x_ap_context_header_sent_on_api_calls(self):
+        client = AsaClient()
+        with patch.object(asa_mod.requests, 'post') as mock_post, \
+                patch.object(asa_mod.requests, 'request') as mock_request:
+            mock_post.return_value = _resp(200, {'access_token': 'tok'})
+            mock_request.return_value = _resp(200, {'data': []})
+            client._make_request('GET', '/campaigns')
+
+        api_headers = mock_request.call_args.kwargs['headers']
+        self.assertEqual(api_headers['X-AP-Context'], 'orgId=20732690')
+        self.assertEqual(api_headers['Authorization'], 'Bearer tok')
+
+    def test_missing_org_id_raises(self):
+        with override_settings(ASA_ORG_ID=''):
+            with self.assertRaises(ValueError):
+                AsaClient()

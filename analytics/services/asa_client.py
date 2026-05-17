@@ -78,6 +78,7 @@ class AsaClient:
         self.client_id = settings.ASA_CLIENT_ID
         self.team_id = settings.ASA_TEAM_ID
         self.key_id = settings.ASA_KEY_ID
+        self.org_id = settings.ASA_ORG_ID
 
         missing = [
             name for name, value in (
@@ -85,6 +86,7 @@ class AsaClient:
                 ('ASA_CLIENT_ID', self.client_id),
                 ('ASA_TEAM_ID', self.team_id),
                 ('ASA_KEY_ID', self.key_id),
+                ('ASA_ORG_ID', self.org_id),
             ) if not value
         ]
         if missing:
@@ -150,10 +152,14 @@ class AsaClient:
 
         for attempt in (1, 2):
             token = self._get_access_token(force_refresh=(attempt == 2))
+            # X-AP-Context (orgId) is required by the ASA API for accounts
+            # with API access. It is NOT sent to the appleid.apple.com
+            # OAuth endpoint — only to api.searchads.apple.com.
             headers = {
                 'Authorization': f'Bearer {token}',
                 'Content-Type': 'application/json',
                 'Accept': 'application/json',
+                'X-AP-Context': f'orgId={self.org_id}',
             }
             started = time.monotonic()
             try:

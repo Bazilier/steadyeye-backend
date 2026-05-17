@@ -64,8 +64,22 @@ The Apple Ads API uses OAuth where the client secret is a self-signed JWT:
 
 The private key and JWT are never logged.
 
+### The X-AP-Context header
+
+The Apple Ads API requires an `X-AP-Context` header naming the org on
+**every** call to `api.searchads.apple.com`:
+
+```
+X-AP-Context: orgId=<ASA_ORG_ID>
+```
+
+Without it the API returns `403 FORBIDDEN — "A required header was not
+specified or was invalid"`. `AsaClient` adds this header to all API
+requests but **not** to the OAuth token exchange at `appleid.apple.com`.
+The org ID is the numeric account ID shown in the Apple Ads dashboard URL.
+
 Required env vars (set in Railway): `ASA_PRIVATE_KEY` (full multiline PEM),
-`ASA_CLIENT_ID`, `ASA_TEAM_ID`, `ASA_KEY_ID`.
+`ASA_CLIENT_ID`, `ASA_TEAM_ID`, `ASA_KEY_ID`, `ASA_ORG_ID` (numeric org ID).
 
 ## Known limitations
 
@@ -87,9 +101,8 @@ Required env vars (set in Railway): `ASA_PRIVATE_KEY` (full multiline PEM),
 - **`orderBy` fields** in report selectors are best-effort per level
   (`campaignId` / `adGroupId` / `keywordId`); adjust if Apple rejects them
   for a given org.
-- **No `X-AP-Context` header** is sent — the OAuth `searchadsorg` scope
-  yields an org-scoped token. If an account needs an explicit org context,
-  that header must be added.
+- **`X-AP-Context: orgId=<ASA_ORG_ID>`** is sent on every API call (see
+  above); the request fails with `403` if `ASA_ORG_ID` is unset or wrong.
 
 ## Verifying data correctness
 

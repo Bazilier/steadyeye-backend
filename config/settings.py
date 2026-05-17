@@ -133,6 +133,8 @@ ASA_PRIVATE_KEY = env('ASA_PRIVATE_KEY', default='')
 ASA_CLIENT_ID = env('ASA_CLIENT_ID', default='')
 ASA_TEAM_ID = env('ASA_TEAM_ID', default='')
 ASA_KEY_ID = env('ASA_KEY_ID', default='')
+# Numeric org ID, sent in the X-AP-Context header on every ASA API call.
+ASA_ORG_ID = env('ASA_ORG_ID', default='')
 
 # Logging
 LOGGING = {
