@@ -127,6 +127,13 @@ REVENUECAT_SECRET_API_KEY = env('REVENUECAT_SECRET_API_KEY', default='')
 ANALYTICS_REFRESH_TOKEN = env('ANALYTICS_REFRESH_TOKEN', default='')
 REVENUECAT_WEBHOOK_SECRET = env('REVENUECAT_WEBHOOK_SECRET', default='')
 
+# Apple Ads (Apple Search Ads) API — OAuth credentials for the Campaign
+# Management API v5. ASA_PRIVATE_KEY is the full multiline PEM.
+ASA_PRIVATE_KEY = env('ASA_PRIVATE_KEY', default='')
+ASA_CLIENT_ID = env('ASA_CLIENT_ID', default='')
+ASA_TEAM_ID = env('ASA_TEAM_ID', default='')
+ASA_KEY_ID = env('ASA_KEY_ID', default='')
+
 # Logging
 LOGGING = {
     'version': 1,
