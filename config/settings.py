@@ -30,6 +30,7 @@ INSTALLED_APPS = [
     'corsheaders',
     'chat',
     'attribution',
+    'analytics',
 ]
 
 MIDDLEWARE = [
@@ -120,6 +121,12 @@ TELEGRAM_WEBHOOK_SECRET = env('TELEGRAM_WEBHOOK_SECRET', default='')
 # Project settings → API keys → New secret API key.
 REVENUECAT_SECRET_API_KEY = env('REVENUECAT_SECRET_API_KEY', default='')
 
+# Analytics aggregation app — shared-secret tokens for the refresh
+# trigger endpoint and the RevenueCat webhook receiver. Actual values
+# are set in the Railway environment.
+ANALYTICS_REFRESH_TOKEN = env('ANALYTICS_REFRESH_TOKEN', default='')
+REVENUECAT_WEBHOOK_SECRET = env('REVENUECAT_WEBHOOK_SECRET', default='')
+
 # Logging
 LOGGING = {
     'version': 1,
@@ -147,6 +154,11 @@ LOGGING = {
             'propagate': False,
         },
         'chat': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'analytics': {
             'handlers': ['console'],
             'level': 'INFO',
             'propagate': False,
