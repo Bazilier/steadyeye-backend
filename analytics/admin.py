@@ -4,6 +4,7 @@ from .models import (
     AsaDailyMetrics,
     Ga4DailyEvent,
     Ga4DailyFunnel,
+    RcActiveSubscriber,
     RcEvent,
     RcSubscriptionSnapshot,
 )
@@ -64,3 +65,14 @@ class Ga4DailyFunnelAdmin(admin.ModelAdmin):
     )
     list_filter = ('date', 'country', 'app_version')
     date_hierarchy = 'date'
+
+
+@admin.register(RcActiveSubscriber)
+class RcActiveSubscriberAdmin(admin.ModelAdmin):
+    list_display = (
+        'app_user_id', 'last_seen_ip_country', 'latest_product',
+        'latest_offer_type', 'total_spent', 'status', 'first_purchase_at',
+    )
+    list_filter = ('status', 'latest_product', 'last_seen_ip_country', 'latest_offer_type')
+    search_fields = ('app_user_id', 'email', 'campaign')
+    readonly_fields = ('imported_at',)
