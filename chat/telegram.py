@@ -4,7 +4,7 @@ import re
 import requests
 from django.conf import settings
 
-from chat.pseudonym import language_to_flag, uuid_to_pseudonym
+from chat.pseudonym import language_to_flag, pseudonym_with_emoji
 
 logger = logging.getLogger(__name__)
 
@@ -23,24 +23,25 @@ def format_inbound_for_telegram(user_uuid: str, text: str, metadata: dict, email
     """Build the Telegram-bound text for a user's inbound message.
 
     Header layout:
-        🐼 Curious Panda 🇺🇸 · v1.4.2
-        💳 subscribed · 0 recordings · en-US
+        🐳 Lively Whale 🇦🇲 · v1.4.2
+        💳 subscribed · 44 recordings · en-AM
         ✉️ user@example.com    (only if email present)
         🆔 <full-uuid>
         —————
         <message text>
 
-    The leading 🐼 is fixed (not derived from the animal) so Cyril can
-    visually anchor on every chat row regardless of which animal the
-    pseudonym hashed to. The full UUID stays in the 🆔 line so the reply
-    parser keeps working.
+    The leading emoji matches the pseudonym's animal (whale → 🐳,
+    panda → 🐼, etc.) for visual consistency. The flag derives from the
+    locale's *region*, not the language, so an English UI in Armenia
+    flies 🇦🇲 rather than the language fallback's 🇺🇸. The full UUID
+    stays in the 🆔 line so the reply parser keeps working.
     """
     metadata = metadata or {}
-    pseudonym = uuid_to_pseudonym(user_uuid)
+    pseudonym, emoji = pseudonym_with_emoji(user_uuid)
     flag = language_to_flag(metadata.get('language', ''))
 
-    # Line 1: pseudonym + flag, optionally followed by app version.
-    line1 = f"🐼 {pseudonym} {flag}"
+    # Line 1: emoji + pseudonym + flag, optionally followed by app version.
+    line1 = f"{emoji} {pseudonym} {flag}"
     if metadata.get('app_version'):
         line1 += f" · v{metadata['app_version']}"
 
