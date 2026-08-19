@@ -106,7 +106,17 @@ def revenuecat_webhook(request):
     logger.info("RC webhook stored event_id=%s type=%s", event_id, event_type)
 
     # 4. Telegram alerts for important events.
-    _maybe_send_alert(event_type, event)
+    #
+    # Guarded deliberately. The event is ALREADY STORED by this point, so the
+    # request has earned its 2xx. A non-2xx would make RevenueCat retry, which
+    # re-enters this function and duplicates the Telegram message (the DB write
+    # is idempotent on event_id; the alert is not). `send_alert` swallows send
+    # failures itself, but only `requests.RequestException` — anything else
+    # raised while building or sending would otherwise escape into a 500.
+    try:
+        _maybe_send_alert(event_type, event)
+    except Exception:  # noqa: BLE001 — an alert must never fail the webhook
+        logger.exception("Failed to send RC alert for event %s", event_id)
 
     # 5. Return 200 fast.
     return Response({'status': 'ok', 'event_id': event_id, 'event_type': event_type})
@@ -120,19 +130,62 @@ def _maybe_send_alert(event_type: str, event: dict) -> None:
     country = event.get('country_code', '?')
     price = event.get('price_in_purchased_currency')
 
+    # Trial lifecycle events are NOT distinct RC event types, so the dispatch
+    # below cannot key on `event_type` alone:
+    #   - trial start      -> INITIAL_PURCHASE with period_type == TRIAL
+    #   - trial -> paid    -> RENEWAL with is_trial_conversion == true
+    #   - cancel in trial  -> CANCELLATION with period_type == TRIAL
+    # INITIAL_PURCHASE and CANCELLATION therefore have to test period_type
+    # BEFORE falling through to the paid-path alerts. Without that split a
+    # trial start announces itself as a new paying customer for $0 — RC sets
+    # the price to zero for a trial — which is exactly what was happening
+    # before these branches existed.
+    period_type = (event.get('period_type') or '').upper()
+    is_trial_period = period_type == 'TRIAL'
+    is_trial_conversion = bool(event.get('is_trial_conversion'))
+
+    # Sandbox events are alerted on, never filtered — sandbox is how this gets
+    # verified. The marker LEADS the message so it survives truncation in a
+    # notification-list preview, where a sandbox purchase must never be
+    # mistaken for a real sale at a glance. Production carries no prefix at
+    # all, so every real alert reads byte-for-byte as it always has.
+    environment = (event.get('environment') or '').upper()
+    prefix = '🧪 SANDBOX 🧪 ' if environment == 'SANDBOX' else ''
+
     if event_type == 'INITIAL_PURCHASE':
-        send_alert(
-            f"💰 New paying customer! {country} | {product} | ${price}",
-            severity='info',
-        )
+        if is_trial_period:
+            send_alert(
+                f"{prefix}🆕 Trial started: {country} | {product} | user {app_user_id}",
+                severity='info',
+            )
+        else:
+            send_alert(
+                f"{prefix}💰 New paying customer! {country} | {product} | ${price}",
+                severity='info',
+            )
+    elif event_type == 'RENEWAL':
+        # Plain renewals stay silent (too noisy long-term). The trial->paid
+        # conversion is the exception: it is the moment the money arrives.
+        if is_trial_conversion:
+            send_alert(
+                f"{prefix}🎉 Trial converted to paid! {country} | {product} | ${price}",
+                severity='info',
+            )
     elif event_type == 'CANCELLATION':
-        send_alert(
-            f"❌ Cancellation: {country} | {product} | user {app_user_id}",
-            severity='warning',
-        )
+        if is_trial_period:
+            send_alert(
+                f"{prefix}💔 Trial cancelled before conversion: {country} | {product} | user {app_user_id}",
+                severity='warning',
+            )
+        else:
+            send_alert(
+                f"{prefix}❌ Cancellation: {country} | {product} | user {app_user_id}",
+                severity='warning',
+            )
     elif event_type == 'BILLING_ISSUE':
         send_alert(
-            f"⚠️ Billing issue: {country} | {product} | user {app_user_id}",
+            f"{prefix}⚠️ Billing issue: {country} | {product} | user {app_user_id}",
             severity='warning',
         )
-    # RENEWAL and other event types: no alert (would be too noisy long-term).
+    # Every other event type — and a RENEWAL that is not a trial conversion —
+    # is stored silently, as before.
