@@ -122,6 +122,46 @@ def revenuecat_webhook(request):
     return Response({'status': 'ok', 'event_id': event_id, 'event_type': event_type})
 
 
+def _format_amount(price, currency: str, price_usd) -> str:
+    """Render a purchase amount for a Telegram alert.
+
+    `price_in_purchased_currency` is the amount in the CUSTOMER'S currency, so
+    it must never be printed under a bare "$" — a Polish customer paying
+    59.99 PLN was being announced as "$59.99", roughly four times the real
+    figure. The local amount is labelled with the ISO code (no symbol table)
+    and RC's converted figure follows in parentheses:
+
+        59.99 PLN (~$15.20)
+
+    Every fallback below prefers an UNLABELLED number to a wrongly labelled
+    one, so a missing field can never turn a foreign amount into dollars.
+    """
+    def num(value):
+        if value is None:
+            return None
+        try:
+            return f"{float(value):.2f}"
+        except (TypeError, ValueError):
+            return str(value)
+
+    local = num(price)
+    usd = num(price_usd)
+
+    # No amount at all: say so rather than printing "None" or a bare symbol.
+    if local is None:
+        return 'unknown'
+    # Currency unknown: a bare number is honest, "$" or "USD" would be a guess.
+    if not currency:
+        return f"{local} (~${usd})" if usd else local
+    # Already USD — the parenthetical would just repeat the same figure.
+    if currency == 'USD':
+        return f"{local} USD"
+    # Converted figure missing: the local amount alone, correctly labelled.
+    if usd is None:
+        return f"{local} {currency}"
+    return f"{local} {currency} (~${usd})"
+
+
 def _maybe_send_alert(event_type: str, event: dict) -> None:
     """Send Telegram alerts for important RC events."""
     raw_user_id = event.get('app_user_id') or 'unknown'
@@ -129,6 +169,13 @@ def _maybe_send_alert(event_type: str, event: dict) -> None:
     product = event.get('product_id', 'unknown')
     country = event.get('country_code', '?')
     price = event.get('price_in_purchased_currency')
+    currency = (event.get('currency') or '').upper()
+    # RC documents `price` as the amount converted to the account's reporting
+    # currency (USD here). This backend had never read it, so it is consumed
+    # defensively: if it is absent the alert falls back to the local amount
+    # alone rather than inventing a dollar figure.
+    price_usd = event.get('price')
+    amount = _format_amount(price, currency, price_usd)
 
     # Trial lifecycle events are NOT distinct RC event types, so the dispatch
     # below cannot key on `event_type` alone:
@@ -160,7 +207,7 @@ def _maybe_send_alert(event_type: str, event: dict) -> None:
             )
         else:
             send_alert(
-                f"{prefix}💰 New paying customer! {country} | {product} | ${price}",
+                f"{prefix}💰 New paying customer! {country} | {product} | {amount}",
                 severity='info',
             )
     elif event_type == 'RENEWAL':
@@ -168,7 +215,7 @@ def _maybe_send_alert(event_type: str, event: dict) -> None:
         # conversion is the exception: it is the moment the money arrives.
         if is_trial_conversion:
             send_alert(
-                f"{prefix}🎉 Trial converted to paid! {country} | {product} | ${price}",
+                f"{prefix}🎉 Trial converted to paid! {country} | {product} | {amount}",
                 severity='info',
             )
     elif event_type == 'CANCELLATION':
