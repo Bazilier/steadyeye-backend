@@ -18,11 +18,21 @@ from analytics.models import RcEvent, RcSubscriptionSnapshot
 from analytics.services.rc_client import RcClient, RcClientError
 
 # Rough monthly-recurring-revenue contribution per product type. The RC v1
-# REST API does not reliably expose a per-user price, so Phase 2 uses these
-# hardcoded list prices (USD).
+# REST API does not reliably expose a per-user price, so these hardcoded US
+# STOREFRONT list prices (USD) stand in for one.
+#
+# They are an estimate in two ways, both deliberate. A subscriber on a
+# non-US storefront pays a local price tier that is not the USD figure
+# converted, and every subscriber on a given product is booked at list price
+# regardless of what they actually paid. Treat `mrr_usd` as a directional
+# figure, not as revenue truth — RC's own dashboard is authoritative.
+#
+# KEEP IN SYNC WITH THE APP STORE CONNECT PRICES. These went stale once
+# already: they still read 6.99 monthly / 49.99 annual long after the real
+# prices moved to 13.99 and 79.99, understating MRR by roughly half.
 PRODUCT_PRICES = {
-    'annual': 49.99 / 12,   # ~4.17/mo
-    'monthly': 6.99,
+    'annual': 79.99 / 12,   # ~6.67/mo
+    'monthly': 13.99,
     'lifetime': 0,          # one-time purchase, not recurring
 }
 
