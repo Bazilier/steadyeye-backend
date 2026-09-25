@@ -34,36 +34,50 @@ __all__ = ['is_valid_app_user_id', 'is_paid_user', 'ENTITLEMENT_ID', 'CACHE_TTL'
 def is_paid_user(app_user_id: str) -> bool:
     """True when the 'access' entitlement is active (or lifetime).
 
-    Fresh cache row -> returned as is. Otherwise RC is queried and the row is
-    refreshed. If RC fails, a stale row wins over guessing; with no row at all
-    the user is treated as free, which only ever costs them access, never
-    money.
+    ONLY POSITIVE RESULTS ARE CACHED. Caching a negative meant a user who
+    subscribed seconds after a free check kept being told they were free for
+    up to ten minutes — they had just paid, so that is the one direction this
+    must never get wrong. A "not paid" answer therefore always costs an RC
+    round trip, which is the cheap side of the trade.
+
+    A fresh cached True short-circuits. Anything else (no row, a legacy
+    is_paid=False row, an expired row) queries RC. If RC fails, a cached True
+    wins even when stale; with nothing cached the user is treated as free,
+    which only ever costs them access, never money.
     """
     now = timezone.now()
     cached = EntitlementCache.objects.filter(app_user_id=app_user_id).first()
 
-    if cached and now - cached.checked_at < CACHE_TTL:
-        return cached.is_paid
+    if cached and cached.is_paid and now - cached.checked_at < CACHE_TTL:
+        return True
 
     try:
         is_paid = _fetch_from_revenuecat(app_user_id)
     except _RevenueCatUnavailable:
-        if cached:
+        if cached and cached.is_paid:
             logger.warning(
                 "entitlement: RC unavailable, using stale cache for app_user_id=%s (checked_at=%s)",
                 app_user_id, cached.checked_at,
             )
-            return cached.is_paid
+            return True
         logger.warning(
-            "entitlement: RC unavailable and no cache for app_user_id=%s, treating as free",
+            "entitlement: RC unavailable and no usable cache for app_user_id=%s, treating as free",
             app_user_id,
         )
         return False
 
-    EntitlementCache.objects.update_or_create(
-        app_user_id=app_user_id,
-        defaults={'is_paid': is_paid, 'checked_at': now},
-    )
+    if is_paid:
+        EntitlementCache.objects.update_or_create(
+            app_user_id=app_user_id,
+            defaults={'is_paid': True, 'checked_at': now},
+        )
+    else:
+        # RC is authoritative that this user is not paid. Drop any row so a
+        # lapsed subscriber can never be served a stale True from it later.
+        # Unconditional rather than guarded on the row we read at the top:
+        # that also clears a row a concurrent request wrote in between.
+        EntitlementCache.objects.filter(app_user_id=app_user_id).delete()
+
     return is_paid
 
 
@@ -91,10 +105,13 @@ def _fetch_from_revenuecat(app_user_id: str) -> bool:
 
     if resp.status_code == 404:
         # Subscriber unknown to RC — a fresh install that has never purchased.
-        # A definite "free", not an outage: cache it.
+        # A definite "free", not an outage, so it is not an error path.
         return False
 
-    if resp.status_code != 200:
+    # 201: RC creates the subscriber record on a GET for an id it has not seen
+    # before and answers 201 with the same body shape as 200. It is a normal
+    # first-look response, not an error.
+    if resp.status_code not in (200, 201):
         logger.warning(
             "entitlement: RC returned %s for app_user_id=%s", resp.status_code, app_user_id
         )

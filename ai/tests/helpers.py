@@ -48,5 +48,18 @@ def rc_lifetime():
     }}})
 
 
-def rc_free():
-    return FakeResponse(200, {'subscriber': {'entitlements': {}}})
+def rc_free(status_code=200):
+    return FakeResponse(status_code, {'subscriber': {'entitlements': {}}})
+
+
+def rc_created_paid(expires_date='2099-01-01T00:00:00Z'):
+    """RevenueCat answers 201 when the GET creates the subscriber record.
+    Same body shape as a 200."""
+    return FakeResponse(201, {'subscriber': {'entitlements': {
+        'access': {'expires_date': expires_date, 'product_identifier': 'annual'},
+    }}})
+
+
+def rc_created_free():
+    """201 for a brand-new subscriber that has never purchased."""
+    return rc_free(status_code=201)
