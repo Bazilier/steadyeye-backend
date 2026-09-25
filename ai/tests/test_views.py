@@ -5,9 +5,11 @@ socket call would fail the suite rather than quietly cost money.
 """
 
 import json
+from datetime import timedelta, timezone as dt_timezone
 from unittest.mock import patch
 
 from django.test import TestCase, override_settings
+from django.utils import timezone
 
 from ai.models import AIUsage, EntitlementCache
 from ai.tests.helpers import anthropic_error, anthropic_ok, rc_free, rc_paid
@@ -24,8 +26,8 @@ SPLIT_URL = '/api/v1/ai/split/'
     ANTHROPIC_API_KEY='test-key-not-real',
     AI_ENABLED=True,
     REVENUECAT_SECRET_API_KEY='rc-test-key-not-real',
-    AI_FREE_LIFETIME_LIMIT=3,
-    AI_PAID_DAILY_LIMIT=100,
+    AI_FREE_DAILY_LIMIT=1,
+    AI_PAID_DAILY_LIMIT=300,
     AI_IP_HOURLY_LIMIT=30,
     AI_GLOBAL_FREE_DAILY_LIMIT=300,
     AI_GLOBAL_DAILY_LIMIT=2000,
@@ -138,24 +140,73 @@ class KillSwitchTests(AIProxyTestCase):
 
 class FreeUserQuotaTests(AIProxyTestCase):
 
-    def test_free_user_gets_three_optimizes_then_403(self):
+    def test_free_user_gets_one_optimize_then_403_the_same_day(self):
+        self.revenuecat.return_value = rc_free()
+
+        resp = self.post(OPTIMIZE_URL, user_id=FREE_UUID)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['text'], 'OPTIMIZED TEXT')
+        self.assertEqual(resp.json()['remaining_free'], 0)
+
+        resp = self.post(OPTIMIZE_URL, user_id=FREE_UUID)
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.json(), {'error': 'free_quota_exhausted'})
+
+        self.assertEqual(self.anthropic.call_count, 1)
+        self.assertEqual(AIUsage.objects.filter(status='ok').count(), 1)
+        self.assertEqual(
+            AIUsage.objects.filter(reject_reason='free_quota_exhausted').count(), 1
+        )
+
+    def test_yesterdays_usage_does_not_count_against_today(self):
+        """The window is UTC-midnight-to-now, so a row from yesterday must not
+        keep a free user locked out today."""
+        self.revenuecat.return_value = rc_free()
+
+        self.assertEqual(self.post(OPTIMIZE_URL, user_id=FREE_UUID).status_code, 200)
+        self.assertEqual(self.post(OPTIMIZE_URL, user_id=FREE_UUID).status_code, 403)
+
+        # Backdate the successful row 24h (created_at is auto_now_add, so it
+        # has to be rewritten rather than passed in).
+        AIUsage.objects.filter(status='ok').update(
+            created_at=timezone.now() - timedelta(days=1)
+        )
+
+        resp = self.post(OPTIMIZE_URL, user_id=FREE_UUID)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['remaining_free'], 0)
+
+    def test_a_row_just_before_utc_midnight_does_not_count(self):
+        """Boundary: the cutoff is UTC midnight, not a rolling 24 hours."""
+        self.revenuecat.return_value = rc_free()
+        self.assertEqual(self.post(OPTIMIZE_URL, user_id=FREE_UUID).status_code, 200)
+
+        just_before_midnight = timezone.now().astimezone(dt_timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ) - timedelta(seconds=1)
+        AIUsage.objects.filter(status='ok').update(created_at=just_before_midnight)
+
+        self.assertEqual(self.post(OPTIMIZE_URL, user_id=FREE_UUID).status_code, 200)
+
+    @override_settings(AI_FREE_DAILY_LIMIT=3)
+    def test_remaining_free_counts_down_when_the_daily_limit_is_raised(self):
         self.revenuecat.return_value = rc_free()
 
         for expected_remaining in (2, 1, 0):
             resp = self.post(OPTIMIZE_URL, user_id=FREE_UUID)
             self.assertEqual(resp.status_code, 200)
-            self.assertEqual(resp.json()['text'], 'OPTIMIZED TEXT')
             self.assertEqual(resp.json()['remaining_free'], expected_remaining)
 
         resp = self.post(OPTIMIZE_URL, user_id=FREE_UUID)
         self.assertEqual(resp.status_code, 403)
         self.assertEqual(resp.json(), {'error': 'free_quota_exhausted'})
 
-        self.assertEqual(self.anthropic.call_count, 3)
-        self.assertEqual(AIUsage.objects.filter(status='ok').count(), 3)
-        self.assertEqual(
-            AIUsage.objects.filter(reject_reason='free_quota_exhausted').count(), 1
-        )
+    def test_free_quota_is_per_user(self):
+        self.revenuecat.return_value = rc_free()
+        self.assertEqual(self.post(OPTIMIZE_URL, user_id=FREE_UUID).status_code, 200)
+
+        other = '55555555-5555-5555-5555-555555555555'
+        self.assertEqual(self.post(OPTIMIZE_URL, user_id=other).status_code, 200)
 
     def test_free_user_split_returns_403_subscription_required(self):
         self.revenuecat.return_value = rc_free()
@@ -174,7 +225,7 @@ class FreeUserQuotaTests(AIProxyTestCase):
             self.post(OPTIMIZE_URL, body={'text': ''}, user_id=FREE_UUID)
         resp = self.post(OPTIMIZE_URL, user_id=FREE_UUID)
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json()['remaining_free'], 2)
+        self.assertEqual(resp.json()['remaining_free'], 0)
 
     @override_settings(AI_GLOBAL_FREE_DAILY_LIMIT=1)
     def test_global_free_daily_limit_returns_429(self):
@@ -216,7 +267,7 @@ class PaidUserTests(AIProxyTestCase):
         self.revenuecat.return_value = rc_lifetime()
         self.assertEqual(self.post(SPLIT_URL, user_id=PAID_UUID).status_code, 200)
 
-    def test_paid_user_is_not_subject_to_the_free_lifetime_limit(self):
+    def test_paid_user_is_not_subject_to_the_free_daily_limit(self):
         self.revenuecat.return_value = rc_paid()
         for _ in range(5):
             self.assertEqual(self.post(OPTIMIZE_URL, user_id=PAID_UUID).status_code, 200)
@@ -335,7 +386,7 @@ class UpstreamTests(AIProxyTestCase):
         self.anthropic.return_value = anthropic_ok()
         resp = self.post(OPTIMIZE_URL, user_id=FREE_UUID)
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json()['remaining_free'], 2)
+        self.assertEqual(resp.json()['remaining_free'], 0)
 
 
 class RequestShapeTests(AIProxyTestCase):

@@ -167,10 +167,13 @@ def _handle(request, endpoint: str) -> Response:
                 ctx, 'paid_daily_limit', 'rate_limited', status.HTTP_429_TOO_MANY_REQUESTS
             )
     else:
-        free_used = AIUsage.objects.filter(
-            app_user_id=app_user_id, endpoint='optimize', status='ok'
+        # Same UTC-midnight window as the paid check above, so both tiers
+        # roll over at the same instant.
+        free_today = AIUsage.objects.filter(
+            app_user_id=app_user_id, endpoint='optimize', status='ok',
+            created_at__gte=midnight,
         ).count()
-        if free_used >= settings.AI_FREE_LIFETIME_LIMIT:
+        if free_today >= settings.AI_FREE_DAILY_LIMIT:
             return _reject(
                 ctx, 'free_quota_exhausted', 'free_quota_exhausted', status.HTTP_403_FORBIDDEN
             )
@@ -186,7 +189,7 @@ def _handle(request, endpoint: str) -> Response:
                 ctx, 'global_free_daily_limit', 'rate_limited', status.HTTP_429_TOO_MANY_REQUESTS
             )
 
-        remaining_free = max(0, settings.AI_FREE_LIFETIME_LIMIT - (free_used + 1))
+        remaining_free = max(0, settings.AI_FREE_DAILY_LIMIT - (free_today + 1))
 
     # (f) Upstream call.
     try:

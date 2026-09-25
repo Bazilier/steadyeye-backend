@@ -149,8 +149,11 @@ AI_MODEL = 'claude-haiku-4-5-20251001'
 
 # Quotas. Per-user first, then two global ceilings that bound the worst-case
 # daily spend even if every per-user check is somehow bypassed.
-AI_FREE_LIFETIME_LIMIT = env.int('AI_FREE_LIFETIME_LIMIT', default=3)
-AI_PAID_DAILY_LIMIT = env.int('AI_PAID_DAILY_LIMIT', default=100)
+# Free tier: one optimize per UTC day, matching the iOS client's own
+# `canOptimizeToday` gate (SubscriptionManager) — a lifetime cap here would
+# 403 users whose app still shows the button as available.
+AI_FREE_DAILY_LIMIT = env.int('AI_FREE_DAILY_LIMIT', default=1)
+AI_PAID_DAILY_LIMIT = env.int('AI_PAID_DAILY_LIMIT', default=300)
 AI_IP_HOURLY_LIMIT = env.int('AI_IP_HOURLY_LIMIT', default=30)
 AI_GLOBAL_FREE_DAILY_LIMIT = env.int('AI_GLOBAL_FREE_DAILY_LIMIT', default=300)
 AI_GLOBAL_DAILY_LIMIT = env.int('AI_GLOBAL_DAILY_LIMIT', default=2000)
