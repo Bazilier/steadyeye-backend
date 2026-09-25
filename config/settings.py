@@ -31,6 +31,7 @@ INSTALLED_APPS = [
     'chat',
     'attribution',
     'analytics',
+    'ai',
 ]
 
 MIDDLEWARE = [
@@ -98,8 +99,11 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # Railway / proxy SSL
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
-# CORS — allow all origins for v1 (iOS app uses arbitrary user agents)
-CORS_ALLOW_ALL_ORIGINS = True
+# CORS — disabled. The iOS client is a native URLSession caller: it sends no
+# Origin header and CORS never applies to it. Allowing all origins only ever
+# granted arbitrary websites the ability to call these endpoints from a
+# visitor's browser.
+CORS_ALLOW_ALL_ORIGINS = False
 
 # DRF
 REST_FRAMEWORK = {
@@ -136,6 +140,21 @@ ASA_KEY_ID = env('ASA_KEY_ID', default='')
 # Numeric org ID, sent in the X-AP-Context header on every ASA API call.
 ASA_ORG_ID = env('ASA_ORG_ID', default='')
 
+# Anthropic proxy (ai app). The API key lives ONLY here, server-side — the
+# iOS client no longer ships one. AI_MODEL is a constant on purpose: it is
+# never read from a request.
+ANTHROPIC_API_KEY = env('ANTHROPIC_API_KEY', default='')
+AI_ENABLED = env.bool('AI_ENABLED', default=True)  # kill switch
+AI_MODEL = 'claude-haiku-4-5-20251001'
+
+# Quotas. Per-user first, then two global ceilings that bound the worst-case
+# daily spend even if every per-user check is somehow bypassed.
+AI_FREE_LIFETIME_LIMIT = env.int('AI_FREE_LIFETIME_LIMIT', default=3)
+AI_PAID_DAILY_LIMIT = env.int('AI_PAID_DAILY_LIMIT', default=100)
+AI_IP_HOURLY_LIMIT = env.int('AI_IP_HOURLY_LIMIT', default=30)
+AI_GLOBAL_FREE_DAILY_LIMIT = env.int('AI_GLOBAL_FREE_DAILY_LIMIT', default=300)
+AI_GLOBAL_DAILY_LIMIT = env.int('AI_GLOBAL_DAILY_LIMIT', default=2000)
+
 # Logging
 LOGGING = {
     'version': 1,
@@ -168,6 +187,11 @@ LOGGING = {
             'propagate': False,
         },
         'analytics': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'ai': {
             'handlers': ['console'],
             'level': 'INFO',
             'propagate': False,
