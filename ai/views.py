@@ -31,7 +31,7 @@ from rest_framework.exceptions import ParseError
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
-from .models import AIUsage
+from .models import AITextLog, AIUsage
 from .services.anthropic_client import AnthropicError, create_message
 from .services.entitlement import is_paid_user, is_valid_app_user_id
 from .services.prompts import OPTIMIZE_SYSTEM_PROMPT, SPLIT_SYSTEM_PROMPT
@@ -212,6 +212,7 @@ def _handle(request, endpoint: str) -> Response:
         "ai.%s ok: app_user_id=%s is_paid=%s in_tokens=%s out_tokens=%s",
         endpoint, app_user_id, is_paid, input_tokens, output_tokens,
     )
+    _log_text(request, endpoint, is_paid, text, result_text)
     return Response({'text': result_text, 'remaining_free': remaining_free})
 
 
@@ -259,6 +260,28 @@ def _record(ctx: dict, *, status_value: str, reject_reason: str = '',
         output_tokens=output_tokens,
         model=settings.AI_MODEL,
     )
+
+
+def _log_text(request, endpoint: str, is_paid: bool, input_text: str, output_text: str) -> None:
+    """Store a successful request's texts in AITextLog when AI_LOG_TEXTS is on,
+    then prune rows past AI_LOG_RETENTION_DAYS. Never raises: a failure here
+    must not change the response, and the texts never go to the logger.
+    """
+    if not settings.AI_LOG_TEXTS:
+        return
+    try:
+        AITextLog.objects.create(
+            endpoint=endpoint,
+            is_paid=is_paid,
+            input_text=input_text,
+            output_text=output_text,
+            accept_language=(request.META.get('HTTP_ACCEPT_LANGUAGE') or '')[:64],
+            user_agent=(request.META.get('HTTP_USER_AGENT') or '')[:256],
+        )
+        cutoff = timezone.now() - timedelta(days=settings.AI_LOG_RETENTION_DAYS)
+        AITextLog.objects.filter(created_at__lt=cutoff).delete()
+    except Exception as exc:
+        logger.warning("ai.text_log failed: %s", type(exc).__name__)
 
 
 def _reject(ctx: dict, reason: str, error_code: str, http_status: int,

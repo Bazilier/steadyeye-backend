@@ -11,7 +11,7 @@ from unittest.mock import patch
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
-from ai.models import AIUsage, EntitlementCache
+from ai.models import AITextLog, AIUsage, EntitlementCache
 from ai.tests.helpers import anthropic_error, anthropic_ok, rc_free, rc_paid
 
 PAID_UUID = '11111111-1111-1111-1111-111111111111'
@@ -463,3 +463,104 @@ class EntitlementCachingTests(AIProxyTestCase):
         self.assertEqual(self.revenuecat.call_count, 1)
         cached = EntitlementCache.objects.get(app_user_id=PAID_UUID)
         self.assertTrue(cached.is_paid)
+
+
+class TextLogTests(AIProxyTestCase):
+    """AITextLog: success-only, flag-gated, never affects the response."""
+
+    def test_flag_off_writes_no_row(self):
+        self.revenuecat.return_value = rc_paid()
+        with self.settings(AI_LOG_TEXTS=False):
+            resp = self.post(OPTIMIZE_URL)
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(AITextLog.objects.count(), 0)
+
+    def test_flag_on_writes_one_row_on_success(self):
+        self.revenuecat.return_value = rc_paid()
+        with self.settings(AI_LOG_TEXTS=True):
+            resp = self.post(
+                OPTIMIZE_URL,
+                HTTP_ACCEPT_LANGUAGE='es-MX,es;q=0.9',
+                HTTP_USER_AGENT='SteadyEye/1 CFNetwork/1 Darwin/25.0.0',
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        row = AITextLog.objects.get()
+        self.assertEqual(row.endpoint, 'optimize')
+        self.assertTrue(row.is_paid)
+        self.assertEqual(row.input_text, 'hello world')
+        self.assertEqual(row.output_text, 'OPTIMIZED TEXT')
+        self.assertEqual(row.accept_language, 'es-MX,es;q=0.9')
+        self.assertEqual(row.user_agent, 'SteadyEye/1 CFNetwork/1 Darwin/25.0.0')
+
+    def test_flag_on_records_split_and_free_user(self):
+        self.revenuecat.return_value = rc_free()
+        with self.settings(AI_LOG_TEXTS=True):
+            self.post(OPTIMIZE_URL, user_id=FREE_UUID)
+
+        row = AITextLog.objects.get()
+        self.assertFalse(row.is_paid)
+
+        self.revenuecat.return_value = rc_paid()
+        with self.settings(AI_LOG_TEXTS=True):
+            self.post(SPLIT_URL)
+        self.assertEqual(AITextLog.objects.filter(endpoint='split').count(), 1)
+
+    def test_long_headers_are_truncated_to_field_lengths(self):
+        self.revenuecat.return_value = rc_paid()
+        with self.settings(AI_LOG_TEXTS=True):
+            self.post(OPTIMIZE_URL, HTTP_ACCEPT_LANGUAGE='a' * 100, HTTP_USER_AGENT='u' * 400)
+
+        row = AITextLog.objects.get()
+        self.assertEqual(len(row.accept_language), 64)
+        self.assertEqual(len(row.user_agent), 256)
+
+    def test_no_row_on_rejected(self):
+        self.revenuecat.return_value = rc_free()
+        with self.settings(AI_LOG_TEXTS=True):
+            resp = self.post(SPLIT_URL, user_id=FREE_UUID)
+
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(AITextLog.objects.count(), 0)
+
+    def test_no_row_on_upstream_error(self):
+        self.revenuecat.return_value = rc_paid()
+        self.anthropic.return_value = anthropic_error(500, 'api_error')
+        with self.settings(AI_LOG_TEXTS=True):
+            resp = self.post(OPTIMIZE_URL)
+
+        self.assertEqual(resp.status_code, 502)
+        self.assertEqual(AITextLog.objects.count(), 0)
+
+    def test_text_log_failure_does_not_change_the_response(self):
+        self.revenuecat.return_value = rc_paid()
+        with self.settings(AI_LOG_TEXTS=True), \
+                patch('ai.views.AITextLog.objects.create', side_effect=RuntimeError('db down')), \
+                self.assertLogs('ai.views', level='WARNING') as logs:
+            resp = self.post(OPTIMIZE_URL)
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {'text': 'OPTIMIZED TEXT', 'remaining_free': None})
+        self.assertEqual(AIUsage.objects.get().status, 'ok')
+        self.assertIn('ai.text_log failed: RuntimeError', logs.output[0])
+        self.assertNotIn('hello world', ''.join(logs.output))
+
+    def test_rows_older_than_retention_are_deleted(self):
+        old = AITextLog.objects.create(
+            endpoint='optimize', is_paid=False, input_text='old', output_text='old',
+        )
+        recent = AITextLog.objects.create(
+            endpoint='optimize', is_paid=False, input_text='recent', output_text='recent',
+        )
+        now = timezone.now()
+        AITextLog.objects.filter(pk=old.pk).update(created_at=now - timedelta(days=91))
+        AITextLog.objects.filter(pk=recent.pk).update(created_at=now - timedelta(days=89))
+
+        self.revenuecat.return_value = rc_paid()
+        with self.settings(AI_LOG_TEXTS=True, AI_LOG_RETENTION_DAYS=90):
+            self.post(OPTIMIZE_URL)
+
+        self.assertFalse(AITextLog.objects.filter(pk=old.pk).exists())
+        self.assertTrue(AITextLog.objects.filter(pk=recent.pk).exists())
+        self.assertEqual(AITextLog.objects.count(), 2)

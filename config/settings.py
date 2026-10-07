@@ -158,6 +158,11 @@ AI_IP_HOURLY_LIMIT = env.int('AI_IP_HOURLY_LIMIT', default=30)
 AI_GLOBAL_FREE_DAILY_LIMIT = env.int('AI_GLOBAL_FREE_DAILY_LIMIT', default=300)
 AI_GLOBAL_DAILY_LIMIT = env.int('AI_GLOBAL_DAILY_LIMIT', default=2000)
 
+# Persist input/output text of successful AI calls in AITextLog (no user id,
+# no IP) for product analysis. Off unless explicitly enabled.
+AI_LOG_TEXTS = env.bool('AI_LOG_TEXTS', default=False)
+AI_LOG_RETENTION_DAYS = env.int('AI_LOG_RETENTION_DAYS', default=90)
+
 # Logging
 LOGGING = {
     'version': 1,

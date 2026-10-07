@@ -40,6 +40,29 @@ class AIUsage(models.Model):
         return f"{self.created_at} {self.endpoint} {self.status} {self.app_user_id[:8]}"
 
 
+class AITextLog(models.Model):
+    """Input and output text of a successful AI request, for product analysis.
+
+    Written only when settings.AI_LOG_TEXTS is on. Deliberately carries no
+    app_user_id, no IP and no link to AIUsage. Rows older than
+    AI_LOG_RETENTION_DAYS are pruned on each insert.
+    """
+
+    endpoint = models.CharField(max_length=20, choices=AIUsage.ENDPOINT_CHOICES)
+    is_paid = models.BooleanField()
+    input_text = models.TextField()
+    output_text = models.TextField()
+    accept_language = models.CharField(max_length=64, blank=True)
+    user_agent = models.CharField(max_length=256, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.created_at} {self.endpoint} {len(self.input_text)} chars"
+
+
 class EntitlementCache(models.Model):
     """Last known RevenueCat entitlement state for an app_user_id.
 
