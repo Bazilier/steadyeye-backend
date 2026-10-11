@@ -247,3 +247,23 @@ class RcActiveSubscriber(models.Model):
 
     def __str__(self):
         return f"{self.app_user_id[:20]} | {self.last_seen_ip_country} | {self.latest_product} | {self.status}"
+
+
+class DuoReport(models.Model):
+    """Diagnostic report sent by the iOS app running on an iPhone Duo.
+    Each row is forwarded to the founder's Telegram on receipt."""
+
+    install_id = models.UUIDField(db_index=True)
+    kind = models.CharField(max_length=32)
+    app_version = models.CharField(max_length=32)
+    build = models.CharField(max_length=16)
+    os_version = models.CharField(max_length=32)
+    model = models.CharField(max_length=64)
+    payload = models.JSONField()
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Duo report #{self.pk} {self.kind} {self.model}"

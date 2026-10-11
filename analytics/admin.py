@@ -2,6 +2,7 @@ from django.contrib import admin
 
 from .models import (
     AsaDailyMetrics,
+    DuoReport,
     Ga4DailyEvent,
     Ga4DailyFunnel,
     RcActiveSubscriber,
@@ -76,3 +77,17 @@ class RcActiveSubscriberAdmin(admin.ModelAdmin):
     list_filter = ('status', 'latest_product', 'last_seen_ip_country', 'latest_offer_type')
     search_fields = ('app_user_id', 'email', 'campaign')
     readonly_fields = ('imported_at',)
+
+
+@admin.register(DuoReport)
+class DuoReportAdmin(admin.ModelAdmin):
+    list_display = (
+        'created_at', 'kind', 'model', 'app_version', 'os_version', 'short_install_id',
+    )
+    list_filter = ('kind', 'model', 'app_version')
+    readonly_fields = ('created_at',)
+    date_hierarchy = 'created_at'
+
+    @admin.display(description='install')
+    def short_install_id(self, obj):
+        return str(obj.install_id)[:8]

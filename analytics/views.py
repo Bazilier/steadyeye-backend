@@ -1,14 +1,24 @@
+import json
 import logging
-from datetime import datetime, timezone as dt_timezone
+from datetime import datetime, timedelta, timezone as dt_timezone
 
 from django.conf import settings
+from django.utils import timezone
 from rest_framework import status
-from rest_framework.decorators import api_view
+from rest_framework.decorators import (
+    api_view,
+    authentication_classes,
+    permission_classes,
+    throttle_classes,
+)
 from rest_framework.exceptions import ParseError
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
 from .alerts import send_alert
-from .models import RcEvent
+from .duo_telegram import send_duo_report
+from .models import DuoReport, RcEvent
+from .serializers import DuoReportSerializer
 
 logger = logging.getLogger(__name__)
 
@@ -236,3 +246,47 @@ def _maybe_send_alert(event_type: str, event: dict) -> None:
         )
     # Every other event type — and a RENEWAL that is not a trial conversion —
     # is stored silently, as before.
+
+
+DUO_PAYLOAD_MAX_BYTES = 64 * 1024
+DUO_REPORTS_PER_INSTALL_PER_DAY = 40
+
+
+@api_view(['POST'])
+@authentication_classes([])
+@permission_classes([AllowAny])
+@throttle_classes([])
+def duo_report(request):
+    """Store an iPhone Duo diagnostic report and forward it to Telegram.
+
+    Unauthenticated, like chat `messages`: the iOS app is a native URLSession
+    caller with no session cookie. Explicitly empty authentication classes
+    (as in the ai app) mean SessionAuthentication's CSRF check can never apply.
+    """
+    serializer = DuoReportSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    data = serializer.validated_data
+
+    payload_bytes = len(
+        json.dumps(data['payload'], ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+    )
+    if payload_bytes > DUO_PAYLOAD_MAX_BYTES:
+        return Response(
+            {'error': 'payload_too_large', 'max_bytes': DUO_PAYLOAD_MAX_BYTES},
+            status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+        )
+
+    recent = DuoReport.objects.filter(
+        install_id=data['install_id'],
+        created_at__gte=timezone.now() - timedelta(hours=24),
+    ).count()
+    if recent >= DUO_REPORTS_PER_INSTALL_PER_DAY:
+        logger.warning("Duo report rate limited for install %s", data['install_id'])
+        return Response({'error': 'rate_limited'}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+    report = DuoReport.objects.create(**data)
+    logger.info("Stored Duo report #%s kind=%s model=%s", report.pk, report.kind, report.model)
+
+    send_duo_report(report)
+
+    return Response({'id': report.pk}, status=status.HTTP_201_CREATED)
