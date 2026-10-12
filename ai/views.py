@@ -6,6 +6,11 @@ other field in the request body is ignored on purpose.
 
     POST /api/v1/ai/optimize/   {"text": "..."}   -> {"text": ..., "remaining_free": int|null}
     POST /api/v1/ai/split/      {"text": "..."}   -> {"text": ..., "remaining_free": null}
+    POST /api/v1/ai/draft/      {"text": "<topic>", "length_sec": 15|30|60, "kind": "..."}
+                                -> {"text": ..., "remaining_free": int|null}
+
+`draft` is the one endpoint with fields beyond `text`, and both are closed
+enums: the server, not the client, turns them into the model's input.
 
 Identity is the `X-App-User-Id` header (the RevenueCat appUserID), checked
 against RC for the 'access' entitlement. There is no authentication in front
@@ -14,6 +19,7 @@ ceiling, not an identity guarantee. App Attest is the missing piece.
 """
 
 import logging
+import re
 from datetime import timedelta, timezone as dt_timezone
 
 from django.conf import settings
@@ -34,7 +40,11 @@ from rest_framework.response import Response
 from .models import AITextLog, AIUsage
 from .services.anthropic_client import AnthropicError, create_message
 from .services.entitlement import is_paid_user, is_valid_app_user_id
-from .services.prompts import OPTIMIZE_SYSTEM_PROMPT, SPLIT_SYSTEM_PROMPT
+from .services.prompts import (
+    DRAFT_SYSTEM_PROMPT,
+    OPTIMIZE_SYSTEM_PROMPT,
+    SPLIT_SYSTEM_PROMPT,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,20 +60,47 @@ USER_ID_HEADER = 'X-App-User-Id'
 # the document exceeds 15000 (BulkImportView.swift:369) — below that threshold
 # it posts the whole document in one call, so 15000 is the real largest client
 # payload, not the 10000 chunk size. 15000 + 20% = 18000.
+#
+# DRAFT input cap: 300 chars. The input is a one-line topic, not a script.
 ENDPOINTS = {
     'optimize': {
         'system_prompt': OPTIMIZE_SYSTEM_PROMPT,
         'max_tokens': 2048,
         'max_input_chars': 20000,
         'requires_paid': False,
+        'free_limit_setting': 'AI_FREE_DAILY_LIMIT',
     },
     'split': {
         'system_prompt': SPLIT_SYSTEM_PROMPT,
         'max_tokens': 8192,
         'max_input_chars': 18000,
         'requires_paid': True,
+        'free_limit_setting': None,
+    },
+    'draft': {
+        'system_prompt': DRAFT_SYSTEM_PROMPT,
+        'max_tokens': 1024,
+        'max_input_chars': 300,
+        'requires_paid': False,
+        'free_limit_setting': 'AI_FREE_DRAFT_DAILY_LIMIT',
     },
 }
+
+# Draft options. Spoken pace is about 2.5 words a second.
+DRAFT_LENGTH_WORDS = {15: 40, 30: 80, 60: 150}
+DRAFT_DEFAULT_LENGTH = 30
+DRAFT_KINDS = {
+    'short': 'Short vertical video (Reels, TikTok, Shorts)',
+    'youtube': 'YouTube video',
+    'sales': 'Sales or pitch video',
+    'lesson': 'Lesson or course segment',
+    'other': 'Talking-to-camera video',
+}
+DRAFT_DEFAULT_KIND = 'other'
+DRAFT_FALLBACK_LANGUAGE = 'en'
+# The model answers this, alone, for a topic it will not write about.
+DRAFT_REFUSAL = 'CANNOT_DRAFT'
+_LANGUAGE_TAG = re.compile(r'^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?$')
 
 
 @api_view(['POST'])
@@ -80,6 +117,40 @@ def optimize(request):
 @throttle_classes([])
 def split(request):
     return _handle(request, 'split')
+
+
+@api_view(['POST'])
+@authentication_classes([])
+@permission_classes([AllowAny])
+@throttle_classes([])
+def draft(request):
+    return _handle(request, 'draft')
+
+
+def _draft_user_message(request, body: dict, topic: str) -> str | None:
+    """The model's input for a draft, built here from closed enums plus the
+    topic. None when an option is present but not one of the allowed values.
+    """
+    length = body.get('length_sec', DRAFT_DEFAULT_LENGTH)
+    kind = body.get('kind', DRAFT_DEFAULT_KIND)
+    # bool is an int subclass: reject True/False explicitly.
+    if isinstance(length, bool) or length not in DRAFT_LENGTH_WORDS:
+        return None
+    if kind not in DRAFT_KINDS:
+        return None
+    return (
+        f"Topic: {topic.strip()}\n"
+        f"Kind of video: {DRAFT_KINDS[kind]}\n"
+        f"Target length: {length} seconds, about {DRAFT_LENGTH_WORDS[length]} words\n"
+        f"Fallback language: {_fallback_language(request)}"
+    )
+
+
+def _fallback_language(request) -> str:
+    """First Accept-Language tag (iOS sends the app's language), if sane."""
+    header = request.META.get('HTTP_ACCEPT_LANGUAGE') or ''
+    first = header.split(',')[0].split(';')[0].strip()
+    return first if _LANGUAGE_TAG.match(first) else DRAFT_FALLBACK_LANGUAGE
 
 
 def _handle(request, endpoint: str) -> Response:
@@ -123,6 +194,12 @@ def _handle(request, endpoint: str) -> Response:
             status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             extra={'max_chars': max_chars},
         )
+
+    user_message = text
+    if endpoint == 'draft':
+        user_message = _draft_user_message(request, body, text)
+        if user_message is None:
+            return _reject(ctx, 'invalid_input', 'invalid_input', status.HTTP_400_BAD_REQUEST)
 
     now = timezone.now()
     midnight = now.astimezone(dt_timezone.utc).replace(
@@ -168,12 +245,14 @@ def _handle(request, endpoint: str) -> Response:
             )
     else:
         # Same UTC-midnight window as the paid check above, so both tiers
-        # roll over at the same instant.
+        # roll over at the same instant. Each endpoint open to free users
+        # has its own allowance.
+        free_limit = getattr(settings, config['free_limit_setting'])
         free_today = AIUsage.objects.filter(
-            app_user_id=app_user_id, endpoint='optimize', status='ok',
+            app_user_id=app_user_id, endpoint=endpoint, status='ok',
             created_at__gte=midnight,
         ).count()
-        if free_today >= settings.AI_FREE_DAILY_LIMIT:
+        if free_today >= free_limit:
             return _reject(
                 ctx, 'free_quota_exhausted', 'free_quota_exhausted', status.HTTP_403_FORBIDDEN
             )
@@ -189,12 +268,12 @@ def _handle(request, endpoint: str) -> Response:
                 ctx, 'global_free_daily_limit', 'rate_limited', status.HTTP_429_TOO_MANY_REQUESTS
             )
 
-        remaining_free = max(0, settings.AI_FREE_DAILY_LIMIT - (free_today + 1))
+        remaining_free = max(0, free_limit - (free_today + 1))
 
     # (f) Upstream call.
     try:
         result_text, input_tokens, output_tokens = create_message(
-            config['system_prompt'], text, config['max_tokens']
+            config['system_prompt'], user_message, config['max_tokens']
         )
     except AnthropicError as exc:
         _record(ctx, status_value='upstream_error')
@@ -213,6 +292,12 @@ def _handle(request, endpoint: str) -> Response:
         endpoint, app_user_id, is_paid, input_tokens, output_tokens,
     )
     _log_text(request, endpoint, is_paid, text, result_text)
+    if endpoint == 'draft' and result_text.strip() == DRAFT_REFUSAL:
+        # Still counted: the call was made and paid for.
+        return Response(
+            {'error': 'cannot_draft', 'remaining_free': remaining_free},
+            status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        )
     return Response({'text': result_text, 'remaining_free': remaining_free})
 
 

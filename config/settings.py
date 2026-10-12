@@ -160,6 +160,9 @@ AI_MODEL = 'claude-haiku-4-5-20251001'
 # `canOptimizeToday` gate (SubscriptionManager) — a lifetime cap here would
 # 403 users whose app still shows the button as available.
 AI_FREE_DAILY_LIMIT = env.int('AI_FREE_DAILY_LIMIT', default=1)
+# Script drafts from a topic, counted apart from optimize: onboarding hands a
+# new user a draft, which must not burn their one optimize of the day.
+AI_FREE_DRAFT_DAILY_LIMIT = env.int('AI_FREE_DRAFT_DAILY_LIMIT', default=3)
 AI_PAID_DAILY_LIMIT = env.int('AI_PAID_DAILY_LIMIT', default=300)
 AI_IP_HOURLY_LIMIT = env.int('AI_IP_HOURLY_LIMIT', default=30)
 AI_GLOBAL_FREE_DAILY_LIMIT = env.int('AI_GLOBAL_FREE_DAILY_LIMIT', default=300)

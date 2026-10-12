@@ -13,6 +13,7 @@ class AIUsage(models.Model):
     ENDPOINT_CHOICES = [
         ('optimize', 'Optimize'),
         ('split', 'Split'),
+        ('draft', 'Draft'),
     ]
 
     STATUS_CHOICES = [

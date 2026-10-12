@@ -564,3 +564,96 @@ class TextLogTests(AIProxyTestCase):
         self.assertFalse(AITextLog.objects.filter(pk=old.pk).exists())
         self.assertTrue(AITextLog.objects.filter(pk=recent.pk).exists())
         self.assertEqual(AITextLog.objects.count(), 2)
+
+
+DRAFT_URL = '/api/v1/ai/draft/'
+
+
+@override_settings(AI_FREE_DRAFT_DAILY_LIMIT=3)
+class DraftTests(AIProxyTestCase):
+    """POST /api/v1/ai/draft/: a script drafted from a one-line topic."""
+
+    def user_message(self):
+        return self.sent_payload()['messages'][0]['content']
+
+    def test_the_model_input_is_built_server_side_from_the_options(self):
+        self.anthropic.return_value = anthropic_ok('A DRAFT')
+        resp = self.post(
+            DRAFT_URL,
+            {'text': 'running tips', 'length_sec': 15, 'kind': 'short'},
+            HTTP_ACCEPT_LANGUAGE='es-MX,es;q=0.9',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['text'], 'A DRAFT')
+        message = self.user_message()
+        self.assertIn('Topic: running tips', message)
+        self.assertIn('15 seconds, about 40 words', message)
+        self.assertIn('Short vertical video', message)
+        self.assertIn('Fallback language: es-MX', message)
+        from ai.services.prompts import DRAFT_SYSTEM_PROMPT
+        self.assertEqual(self.sent_payload()['system'], DRAFT_SYSTEM_PROMPT)
+        self.assertEqual(self.sent_payload()['max_tokens'], 1024)
+
+    def test_options_default_to_thirty_seconds_and_a_general_video(self):
+        self.post(DRAFT_URL, {'text': 'my morning routine'})
+        message = self.user_message()
+        self.assertIn('30 seconds, about 80 words', message)
+        self.assertIn('Talking-to-camera video', message)
+        self.assertIn('Fallback language: en', message)
+
+    def test_a_malformed_language_header_falls_back_to_english(self):
+        self.post(DRAFT_URL, {'text': 'topic'}, HTTP_ACCEPT_LANGUAGE='<script>')
+        self.assertIn('Fallback language: en', self.user_message())
+
+    def test_unknown_length_is_rejected(self):
+        for length in (45, '30', True, None):
+            resp = self.post(DRAFT_URL, {'text': 'topic', 'length_sec': length})
+            self.assertEqual(resp.status_code, 400, length)
+            self.assertEqual(resp.json()['error'], 'invalid_input')
+        self.anthropic.assert_not_called()
+
+    def test_unknown_kind_is_rejected(self):
+        resp = self.post(DRAFT_URL, {'text': 'topic', 'kind': 'poem'})
+        self.assertEqual(resp.status_code, 400)
+        self.anthropic.assert_not_called()
+
+    def test_topic_over_300_chars_returns_413(self):
+        resp = self.post(DRAFT_URL, {'text': 'x' * 301})
+        self.assertEqual(resp.status_code, 413)
+        self.assertEqual(resp.json()['max_chars'], 300)
+
+    def test_free_user_gets_three_drafts_a_day_then_403(self):
+        for expected_remaining in (2, 1, 0):
+            resp = self.post(DRAFT_URL, {'text': 'topic'}, user_id=FREE_UUID)
+            self.assertEqual(resp.status_code, 200)
+            self.assertEqual(resp.json()['remaining_free'], expected_remaining)
+        resp = self.post(DRAFT_URL, {'text': 'topic'}, user_id=FREE_UUID)
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.json()['error'], 'free_quota_exhausted')
+
+    def test_drafts_do_not_use_up_the_free_optimize(self):
+        for _ in range(3):
+            self.post(DRAFT_URL, {'text': 'topic'}, user_id=FREE_UUID)
+        resp = self.post(OPTIMIZE_URL, user_id=FREE_UUID)
+        self.assertEqual(resp.status_code, 200)
+
+    def test_optimize_does_not_use_up_free_drafts(self):
+        self.post(OPTIMIZE_URL, user_id=FREE_UUID)
+        resp = self.post(DRAFT_URL, {'text': 'topic'}, user_id=FREE_UUID)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['remaining_free'], 2)
+
+    def test_paid_user_has_no_remaining_free(self):
+        self.revenuecat.return_value = rc_paid()
+        resp = self.post(DRAFT_URL, {'text': 'topic'})
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsNone(resp.json()['remaining_free'])
+
+    def test_a_refusal_returns_422_cannot_draft_and_is_counted(self):
+        self.anthropic.return_value = anthropic_ok('CANNOT_DRAFT\n')
+        resp = self.post(DRAFT_URL, {'text': 'something bad'}, user_id=FREE_UUID)
+        self.assertEqual(resp.status_code, 422)
+        self.assertEqual(resp.json()['error'], 'cannot_draft')
+        self.assertEqual(
+            AIUsage.objects.filter(endpoint='draft', status='ok').count(), 1
+        )

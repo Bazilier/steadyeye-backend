@@ -3,6 +3,8 @@
     ai/prompts/optimize.txt  <-  PromptFlow/Shared/Prompts/FormatPrompt.txt
     ai/prompts/split.txt     <-  PromptFlow/Shared/Prompts/SplitPrompt.txt
 
+    ai/prompts/draft.txt     (server-only: drafts a script from a topic)
+
 The iOS `loadPrompt` helper returned the file contents verbatim, trailing
 newline included, so these are read without stripping — the bytes sent to
 Anthropic must be identical or the model output shifts.
@@ -20,3 +22,4 @@ def _load(name: str) -> str:
 # Loaded once at import, mirroring the iOS `static let` prompt properties.
 OPTIMIZE_SYSTEM_PROMPT = _load('optimize.txt')
 SPLIT_SYSTEM_PROMPT = _load('split.txt')
+DRAFT_SYSTEM_PROMPT = _load('draft.txt')
