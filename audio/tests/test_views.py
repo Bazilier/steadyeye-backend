@@ -18,6 +18,8 @@ from audio.services import auphonic_client
 
 PAID_UUID = '11111111-1111-1111-1111-111111111111'
 OTHER_UUID = '33333333-3333-3333-3333-333333333333'
+DEVICE_UUID = '44444444-4444-4444-4444-444444444444'
+QUOTA_URL = '/api/v1/audio/quota/'
 ENHANCE_URL = '/api/v1/audio/enhance/'
 FIXTURE = Path(__file__).parent / 'fixtures' / 'two_seconds.m4a'
 PRODUCTION_UUID = 'KKw7AxpLrDBQKLVnQCBtCh'
@@ -52,6 +54,7 @@ def production(status_code, length=2.0, output_files=None):
     REVENUECAT_SECRET_API_KEY='rc-test-key-not-real',
     AUDIO_ENHANCE_PAID_MONTHLY_UNITS=10,
     AUDIO_ENHANCE_TRIAL_UNITS=3,
+    AUDIO_ENHANCE_FREE_UNITS=1,
     AUDIO_ENHANCE_IP_DAILY_UNITS=15,
     AUDIO_ENHANCE_GLOBAL_DAILY_UNITS=15,
     AUDIO_ENHANCE_GLOBAL_MONTHLY_UNITS=40,
@@ -71,7 +74,8 @@ class AudioEnhanceTestCase(TestCase):
             return auphonic_ok({'uuid': PRODUCTION_UUID})
         return auphonic_ok()
 
-    def upload(self, user_id=PAID_UUID, content=None, name='audio', request_id=None):
+    def upload(self, user_id=PAID_UUID, content=None, name='audio', request_id=None,
+               device_id=None):
         data = {}
         if request_id is not None:
             data['request_id'] = request_id
@@ -79,6 +83,8 @@ class AudioEnhanceTestCase(TestCase):
             body = FIXTURE.read_bytes() if content is None else content
             data[name] = SimpleUploadedFile('a.m4a', body, content_type='audio/mp4')
         headers = {'x-app-user-id': user_id} if user_id else {}
+        if device_id:
+            headers['x-device-id'] = device_id
         return self.client.post(ENHANCE_URL, data=data, headers=headers)
 
     def get(self, path, user_id=PAID_UUID):
@@ -144,12 +150,28 @@ class AudioEnhanceTestCase(TestCase):
         self.assertEqual(resp.status_code, 413)
         self.assertEqual(resp.json()['error'], 'input_too_long')
 
-    def test_free_user_is_refused(self):
+    def test_free_user_gets_one_try(self):
         self.revenuecat.return_value = rc_free()
-        resp = self.upload()
-        self.assertEqual(resp.status_code, 403)
-        self.assertEqual(resp.json()['error'], 'subscription_required')
-        self.auphonic.assert_not_called()
+        first = self.upload()
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(first.json()['quota']['remaining'], 0)
+        self.assertEqual(AudioJob.objects.get().tier, 'free')
+
+        again = self.upload()
+        self.assertEqual(again.status_code, 429)
+        self.assertEqual(again.json()['error'], 'free_limit')
+
+    def test_free_try_is_per_device_too(self):
+        self.revenuecat.return_value = rc_free()
+        self.assertEqual(self.upload(device_id=DEVICE_UUID).status_code, 201)
+        # A reinstall: new anonymous RevenueCat id, same Keychain device id.
+        resp = self.upload(user_id=OTHER_UUID, device_id=DEVICE_UUID)
+        self.assertEqual(resp.status_code, 429)
+        self.assertEqual(resp.json()['error'], 'free_limit')
+
+    def test_free_try_does_not_count_for_a_later_subscription(self):
+        self._jobs(1, tier='free')
+        self.assertEqual(self.upload().json()['quota']['remaining'], 9)
 
     def test_revenuecat_down_refuses(self):
         self.revenuecat.return_value = FakeResponse(500, {})
@@ -164,9 +186,9 @@ class AudioEnhanceTestCase(TestCase):
             AudioJob.objects.create(app_user_id=user, input_sec=60, units=units, **fields)
 
     def test_short_clip_is_one_unit_and_remaining_is_reported(self):
-        body = self.upload().json()
+        quota = self.upload().json()['quota']
         self.assertEqual(AudioJob.objects.get().units, 1)
-        self.assertEqual((body['limit'], body['remaining']), (10, 9))
+        self.assertEqual((quota['tier'], quota['limit'], quota['remaining']), ('paid', 10, 9))
 
     def test_units_round_up_per_three_minutes(self):
         with patch('audio.views.m4a_duration_sec', return_value=7 * 60):
@@ -199,12 +221,11 @@ class AudioEnhanceTestCase(TestCase):
         resp = self.upload()
         self.assertEqual(resp.status_code, 429)
         self.assertEqual(resp.json()['error'], 'trial_limit')
-        self.assertTrue(all(job.is_trial for job in AudioJob.objects.all()))
+        self.assertTrue(all(job.tier == 'trial' for job in AudioJob.objects.all()))
 
     def test_trial_use_does_not_eat_the_paid_month(self):
-        self._jobs(3, is_trial=True)
-        body = self.upload().json()
-        self.assertEqual(body['remaining'], 9)
+        self._jobs(3, tier='trial')
+        self.assertEqual(self.upload().json()['quota']['remaining'], 9)
 
     def test_ip_daily_limit(self):
         self._jobs(15, user=OTHER_UUID, ip='127.0.0.1')
@@ -338,3 +359,37 @@ class AudioEnhanceTestCase(TestCase):
         self.assertEqual(self.auphonic.call_args.args[0], 'delete')
         self.assertIsNotNone(AudioJob.objects.get(id=job.id).deleted_at)
         self.assertEqual(self.get(f'{ENHANCE_URL}{job.id}/result/').status_code, 410)
+
+    # --- GET quota ------------------------------------------------------------
+
+    def quota(self, user_id=PAID_UUID, device_id=None):
+        headers = {'x-app-user-id': user_id}
+        if device_id:
+            headers['x-device-id'] = device_id
+        return self.client.get(QUOTA_URL, headers=headers)
+
+    def test_quota_paid(self):
+        self._jobs(3)
+        body = self.quota().json()
+        self.assertEqual(
+            {k: body[k] for k in ('tier', 'limit', 'used', 'remaining', 'paid_monthly_limit')},
+            {'tier': 'paid', 'limit': 10, 'used': 3, 'remaining': 7, 'paid_monthly_limit': 10},
+        )
+        self.assertTrue(body['resets_at'].endswith('-01'))
+
+    def test_quota_trial(self):
+        self.revenuecat.return_value = rc_trial()
+        body = self.quota().json()
+        self.assertEqual((body['tier'], body['remaining'], body['resets_at']), ('trial', 3, None))
+
+    def test_quota_free_sees_the_device_try(self):
+        self.revenuecat.return_value = rc_free()
+        AudioJob.objects.create(
+            app_user_id=OTHER_UUID, input_sec=30, tier='free', device_id=DEVICE_UUID,
+        )
+        self.assertEqual(self.quota(device_id=DEVICE_UUID).json()['remaining'], 0)
+        self.assertEqual(self.quota().json()['remaining'], 1)
+
+    def test_quota_refuses_when_revenuecat_is_down(self):
+        self.revenuecat.return_value = FakeResponse(500, {})
+        self.assertEqual(self.quota().status_code, 502)

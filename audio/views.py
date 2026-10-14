@@ -12,6 +12,7 @@ Auphonic key and every processing setting live only on the server.
                                                   status: processing | done | error
     GET    /api/v1/audio/enhance/<id>/result/  -> the processed .m4a (ALAC)
     DELETE /api/v1/audio/enhance/<id>/         -> 204; deletes the files at Auphonic
+    GET    /api/v1/audio/quota/                -> the caller's allowance (see _quota)
 
 The client is expected to DELETE once it has saved the result, so the user's
 audio doesn't stay at Auphonic longer than needed.
@@ -25,17 +26,21 @@ Quotas count units (one per started 3 minutes of audio — Auphonic's minimum
 charge per production), cheapest check last:
     global per month, global per day   -> 429 rate_limited
     per IP per day                     -> 429 rate_limited
+    free: once ever, per user/device   -> 429 free_limit
     trial: per whole trial             -> 429 trial_limit
     paid: per calendar month           -> 429 monthly_limit
-Failed jobs count nowhere: Auphonic doesn't charge for them.
+Failed jobs count nowhere: Auphonic doesn't charge for them. The optional
+`X-Device-Id` header (a Keychain UUID) ties the free try to the device too,
+since a reinstall mints a new anonymous RevenueCat id.
 """
 
 import logging
 import math
+import uuid
 from datetime import timedelta, timezone as dt_timezone
 
 from django.conf import settings
-from django.db.models import Sum
+from django.db.models import Q, Sum
 from django.http import StreamingHttpResponse
 from django.utils import timezone
 from rest_framework import status
@@ -60,6 +65,7 @@ from .services.media import m4a_duration_sec
 logger = logging.getLogger(__name__)
 
 USER_ID_HEADER = 'X-App-User-Id'
+DEVICE_ID_HEADER = 'X-Device-Id'
 
 # One recording at a time. 128 kbps mono AAC (what AssetWriterRecorder
 # writes) is about 1 MB a minute, so 15 minutes is ~15 MB; the byte cap has
@@ -114,14 +120,12 @@ def enhance(request):
             extra={'max_sec': MAX_INPUT_SEC},
         )
 
-    # Straight from RevenueCat, uncached: a trial gets a smaller allowance,
+    # Straight from RevenueCat, uncached: each tier has its own allowance,
     # and when RC can't be asked this refuses rather than guesses.
     tier = subscription_status(app_user_id)
     if tier is None:
         return _error('upstream_error', status.HTTP_502_BAD_GATEWAY)
-    if tier == 'free':
-        return _error('subscription_required', status.HTTP_403_FORBIDDEN)
-    is_trial = tier == 'trial'
+    device_id = _device_id(request)
 
     units = max(1, math.ceil(input_sec / UNIT_SEC))
     now = timezone.now().astimezone(dt_timezone.utc)
@@ -147,24 +151,16 @@ def enhance(request):
             logger.warning("audio.enhance: ip daily limit reached for %s", ip)
             return _error('rate_limited', status.HTTP_429_TOO_MANY_REQUESTS)
 
-    user_jobs = jobs.filter(app_user_id=app_user_id)
-    if is_trial:
-        limit = settings.AUDIO_ENHANCE_TRIAL_UNITS
-        used = _units(user_jobs.filter(is_trial=True))
-        limit_error = 'trial_limit'
-    else:
-        limit = settings.AUDIO_ENHANCE_PAID_MONTHLY_UNITS
-        used = _units(user_jobs.filter(is_trial=False, created_at__gte=month_start))
-        limit_error = 'monthly_limit'
-    if used + units > limit:
+    quota = _quota(app_user_id, device_id, tier, now)
+    if units > quota['remaining']:
         return _error(
-            limit_error, status.HTTP_429_TOO_MANY_REQUESTS,
-            extra={'limit': limit, 'used': used, 'units': units},
+            LIMIT_ERRORS[tier], status.HTTP_429_TOO_MANY_REQUESTS,
+            extra={'quota': quota, 'units': units},
         )
 
     job = AudioJob.objects.create(
         app_user_id=app_user_id, request_id=request_id, input_sec=input_sec,
-        units=units, is_trial=is_trial, ip=ip,
+        units=units, tier=tier, device_id=device_id, ip=ip,
     )
     try:
         job.production_uuid = auphonic.start_production(
@@ -179,18 +175,82 @@ def enhance(request):
 
     job.save(update_fields=['production_uuid'])
     logger.info(
-        "audio.enhance started: job=%s app_user_id=%s input_sec=%.2f units=%s trial=%s",
-        job.id, app_user_id, input_sec, units, is_trial,
+        "audio.enhance started: job=%s app_user_id=%s input_sec=%.2f units=%s tier=%s",
+        job.id, app_user_id, input_sec, units, tier,
     )
+    quota['used'] += units
+    quota['remaining'] -= units
     return Response(
-        {
-            'id': str(job.id),
-            'status': job.status,
-            'limit': limit,
-            'remaining': max(0, limit - used - units),
-        },
+        {'id': str(job.id), 'status': job.status, 'quota': quota},
         status=status.HTTP_201_CREATED,
     )
+
+
+@api_view(['GET'])
+@authentication_classes([])
+@permission_classes([AllowAny])
+@throttle_classes([])
+def quota(request):
+    """What the caller may still enhance, for the counter on the button."""
+    app_user_id = request.headers.get(USER_ID_HEADER)
+    if not is_valid_app_user_id(app_user_id):
+        return _error('invalid_app_user_id', status.HTTP_400_BAD_REQUEST)
+    if not settings.AUDIO_ENHANCE_ENABLED or not settings.AUPHONIC_API_KEY:
+        return _error('audio_disabled', status.HTTP_503_SERVICE_UNAVAILABLE)
+    tier = subscription_status(app_user_id)
+    if tier is None:
+        return _error('upstream_error', status.HTTP_502_BAD_GATEWAY)
+    now = timezone.now().astimezone(dt_timezone.utc)
+    return Response(_quota(app_user_id, _device_id(request), tier, now))
+
+
+LIMIT_ERRORS = {'free': 'free_limit', 'trial': 'trial_limit', 'paid': 'monthly_limit'}
+
+
+def _quota(app_user_id: str, device_id: str, tier: str, now) -> dict:
+    """The allowance of this tier and how much of it is used.
+
+        {"tier": "free" | "trial" | "paid",
+         "limit": int, "used": int, "remaining": int,
+         "resets_at": ISO date of the next month (paid only, else null),
+         "paid_monthly_limit": int}   # for "with a subscription: N a month"
+    """
+    jobs = AudioJob.objects.exclude(status='error')
+    resets_at = None
+    if tier == 'free':
+        limit = settings.AUDIO_ENHANCE_FREE_UNITS
+        owner = Q(app_user_id=app_user_id)
+        if device_id:
+            owner |= Q(device_id=device_id)
+        used = _units(jobs.filter(owner, tier='free'))
+    elif tier == 'trial':
+        limit = settings.AUDIO_ENHANCE_TRIAL_UNITS
+        used = _units(jobs.filter(app_user_id=app_user_id, tier='trial'))
+    else:
+        limit = settings.AUDIO_ENHANCE_PAID_MONTHLY_UNITS
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        used = _units(jobs.filter(
+            app_user_id=app_user_id, tier='paid', created_at__gte=month_start,
+        ))
+        next_month = (month_start + timedelta(days=32)).replace(day=1)
+        resets_at = next_month.date().isoformat()
+    return {
+        'tier': tier,
+        'limit': limit,
+        'used': used,
+        'remaining': max(0, limit - used),
+        'resets_at': resets_at,
+        'paid_monthly_limit': settings.AUDIO_ENHANCE_PAID_MONTHLY_UNITS,
+    }
+
+
+def _device_id(request) -> str:
+    """The X-Device-Id header if it is a UUID, else ''."""
+    value = (request.headers.get(DEVICE_ID_HEADER) or '').strip()
+    try:
+        return str(uuid.UUID(value))
+    except ValueError:
+        return ''
 
 
 @api_view(['GET', 'DELETE'])

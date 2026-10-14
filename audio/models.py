@@ -30,9 +30,18 @@ class AudioJob(models.Model):
     # What the quotas count: one per started 3 minutes of input, matching
     # Auphonic's 3-minute minimum charge per production.
     units = models.PositiveSmallIntegerField(default=1)
-    # Started during a free trial: counted against the trial allowance, not
-    # the monthly one.
-    is_trial = models.BooleanField(default=False)
+    TIER_CHOICES = [
+        ('free', 'Free'),
+        ('trial', 'Trial'),
+        ('paid', 'Paid'),
+    ]
+    # The user's RevenueCat tier when the job started: which allowance it
+    # counts against (free: once ever, trial: per trial, paid: per month).
+    tier = models.CharField(max_length=10, choices=TIER_CHOICES, default='paid')
+    # Keychain id of the device (X-Device-Id). Survives a reinstall, which
+    # mints a new anonymous RevenueCat id, so the free try can't be renewed
+    # by reinstalling.
+    device_id = models.CharField(max_length=64, blank=True, db_index=True)
     ip = models.GenericIPAddressField(null=True, blank=True)
     # Output length as Auphonic reports it. Should equal input_sec: every
     # cutting algorithm is off, so the client can lay it under the video 1:1.

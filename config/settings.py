@@ -185,6 +185,8 @@ AUDIO_ENHANCE_ENABLED = env.bool('AUDIO_ENHANCE_ENABLED', default=True)  # kill 
 AUDIO_ENHANCE_PAID_MONTHLY_UNITS = env.int('AUDIO_ENHANCE_PAID_MONTHLY_UNITS', default=10)
 # For the whole free trial, not per month.
 AUDIO_ENHANCE_TRIAL_UNITS = env.int('AUDIO_ENHANCE_TRIAL_UNITS', default=3)
+# Without a subscription: once ever, per app user and per device.
+AUDIO_ENHANCE_FREE_UNITS = env.int('AUDIO_ENHANCE_FREE_UNITS', default=1)
 AUDIO_ENHANCE_IP_DAILY_UNITS = env.int('AUDIO_ENHANCE_IP_DAILY_UNITS', default=15)
 # Hard stops on the Auphonic bill, across all users.
 AUDIO_ENHANCE_GLOBAL_DAILY_UNITS = env.int('AUDIO_ENHANCE_GLOBAL_DAILY_UNITS', default=15)
