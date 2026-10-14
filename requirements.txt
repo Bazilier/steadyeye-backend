@@ -9,3 +9,4 @@ whitenoise==6.8.2
 requests==2.32.3
 PyJWT==2.9.0
 cryptography==43.0.1
+mutagen==1.47.0

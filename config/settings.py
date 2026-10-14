@@ -32,6 +32,7 @@ INSTALLED_APPS = [
     'attribution',
     'analytics',
     'ai',
+    'audio',
 ]
 
 MIDDLEWARE = [
@@ -172,6 +173,16 @@ AI_GLOBAL_DAILY_LIMIT = env.int('AI_GLOBAL_DAILY_LIMIT', default=2000)
 # no IP) for product analysis. Off unless explicitly enabled.
 AI_LOG_TEXTS = env.bool('AI_LOG_TEXTS', default=False)
 AI_LOG_RETENTION_DAYS = env.int('AI_LOG_RETENTION_DAYS', default=90)
+
+# Auphonic proxy (audio app): "Studio Sound" for a recording's audio track.
+# Key from auphonic.com → Account Settings → API Keys; server-side only.
+# Processing settings are constants in audio/services/auphonic_client.py.
+AUPHONIC_API_KEY = env('AUPHONIC_API_KEY', default='')
+AUDIO_ENHANCE_ENABLED = env.bool('AUDIO_ENHANCE_ENABLED', default=True)  # kill switch
+# Quotas in billed minutes per UTC day. Auphonic bills input duration with
+# a 3-minute minimum per production, so a 1-minute clip counts as 3.
+AUDIO_ENHANCE_USER_DAILY_MINUTES = env.int('AUDIO_ENHANCE_USER_DAILY_MINUTES', default=30)
+AUDIO_ENHANCE_GLOBAL_DAILY_MINUTES = env.int('AUDIO_ENHANCE_GLOBAL_DAILY_MINUTES', default=60)
 
 # Logging
 LOGGING = {

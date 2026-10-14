@@ -7,4 +7,5 @@ urlpatterns = [
     path('api/v1/attribution/', include('attribution.urls')),
     path('api/v1/analytics/', include('analytics.urls')),
     path('api/v1/ai/', include('ai.urls')),
+    path('api/v1/audio/', include('audio.urls')),
 ]
