@@ -27,6 +27,13 @@ class AudioJob(models.Model):
     production_uuid = models.CharField(max_length=64, blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='processing')
     input_sec = models.FloatField()
+    # What the quotas count: one per started 3 minutes of input, matching
+    # Auphonic's 3-minute minimum charge per production.
+    units = models.PositiveSmallIntegerField(default=1)
+    # Started during a free trial: counted against the trial allowance, not
+    # the monthly one.
+    is_trial = models.BooleanField(default=False)
+    ip = models.GenericIPAddressField(null=True, blank=True)
     # Output length as Auphonic reports it. Should equal input_sec: every
     # cutting algorithm is off, so the client can lay it under the video 1:1.
     length_sec = models.FloatField(null=True, blank=True)

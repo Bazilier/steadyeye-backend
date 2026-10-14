@@ -20,6 +20,14 @@ Identity is the `X-App-User-Id` header, checked against RevenueCat for the
 'access' entitlement — same scheme, and the same caveat, as the ai app: the
 header is asserted, not proven, so the quotas are cost ceilings. A job is
 only visible to the app_user_id that created it.
+
+Quotas count units (one per started 3 minutes of audio — Auphonic's minimum
+charge per production), cheapest check last:
+    global per month, global per day   -> 429 rate_limited
+    per IP per day                     -> 429 rate_limited
+    trial: per whole trial             -> 429 trial_limit
+    paid: per calendar month           -> 429 monthly_limit
+Failed jobs count nowhere: Auphonic doesn't charge for them.
 """
 
 import logging
@@ -27,8 +35,7 @@ import math
 from datetime import timedelta, timezone as dt_timezone
 
 from django.conf import settings
-from django.db.models import FloatField, Sum, Value
-from django.db.models.functions import Greatest
+from django.db.models import Sum
 from django.http import StreamingHttpResponse
 from django.utils import timezone
 from rest_framework import status
@@ -43,7 +50,8 @@ from rest_framework.parsers import MultiPartParser
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
-from ai.services.entitlement import is_paid_user, is_valid_app_user_id
+from ai.services.entitlement import is_valid_app_user_id, subscription_status
+from ai.views import _client_ip as client_ip
 
 from .models import AudioJob
 from .services import auphonic_client as auphonic
@@ -58,8 +66,8 @@ USER_ID_HEADER = 'X-App-User-Id'
 # headroom for files imported from elsewhere.
 MAX_INPUT_SEC = 15 * 60
 MAX_UPLOAD_BYTES = 40 * 1024 * 1024
-# Auphonic bills each production for at least 3 minutes.
-MIN_BILLED_SEC = 180
+# Auphonic bills each production for at least 3 minutes: one quota unit.
+UNIT_SEC = 180
 # Don't ask Auphonic more often than this per job, however fast the client
 # polls. Auphonic asks API users not to hammer the status endpoint.
 STATUS_CHECK_INTERVAL = timedelta(seconds=3)
@@ -106,29 +114,57 @@ def enhance(request):
             extra={'max_sec': MAX_INPUT_SEC},
         )
 
-    if not is_paid_user(app_user_id):
+    # Straight from RevenueCat, uncached: a trial gets a smaller allowance,
+    # and when RC can't be asked this refuses rather than guesses.
+    tier = subscription_status(app_user_id)
+    if tier is None:
+        return _error('upstream_error', status.HTTP_502_BAD_GATEWAY)
+    if tier == 'free':
         return _error('subscription_required', status.HTTP_403_FORBIDDEN)
+    is_trial = tier == 'trial'
 
-    midnight = timezone.now().astimezone(dt_timezone.utc).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
-    billed_sec = max(MIN_BILLED_SEC, input_sec)
+    units = max(1, math.ceil(input_sec / UNIT_SEC))
+    now = timezone.now().astimezone(dt_timezone.utc)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    month_start = day_start.replace(day=1)
+    jobs = AudioJob.objects.exclude(status='error')
 
-    # Global ceiling first: it is the hard stop on the Auphonic bill.
-    global_today = _billed_sec(AudioJob.objects.filter(created_at__gte=midnight))
-    if global_today + billed_sec > settings.AUDIO_ENHANCE_GLOBAL_DAILY_MINUTES * 60:
-        logger.warning("audio.enhance: global daily limit reached (%.0f s)", global_today)
+    # The hard stops on the Auphonic bill come first.
+    global_month = _units(jobs.filter(created_at__gte=month_start))
+    global_day = _units(jobs.filter(created_at__gte=day_start))
+    if (global_month + units > settings.AUDIO_ENHANCE_GLOBAL_MONTHLY_UNITS
+            or global_day + units > settings.AUDIO_ENHANCE_GLOBAL_DAILY_UNITS):
+        logger.warning(
+            "audio.enhance: global limit reached (month %s, day %s units)",
+            global_month, global_day,
+        )
         return _error('rate_limited', status.HTTP_429_TOO_MANY_REQUESTS)
 
-    user_today = _billed_sec(
-        AudioJob.objects.filter(app_user_id=app_user_id, created_at__gte=midnight)
-    )
-    user_limit_sec = settings.AUDIO_ENHANCE_USER_DAILY_MINUTES * 60
-    if user_today + billed_sec > user_limit_sec:
-        return _error('daily_limit', status.HTTP_429_TOO_MANY_REQUESTS)
+    ip = client_ip(request)
+    if ip is not None:
+        ip_day = _units(jobs.filter(ip=ip, created_at__gte=day_start))
+        if ip_day + units > settings.AUDIO_ENHANCE_IP_DAILY_UNITS:
+            logger.warning("audio.enhance: ip daily limit reached for %s", ip)
+            return _error('rate_limited', status.HTTP_429_TOO_MANY_REQUESTS)
+
+    user_jobs = jobs.filter(app_user_id=app_user_id)
+    if is_trial:
+        limit = settings.AUDIO_ENHANCE_TRIAL_UNITS
+        used = _units(user_jobs.filter(is_trial=True))
+        limit_error = 'trial_limit'
+    else:
+        limit = settings.AUDIO_ENHANCE_PAID_MONTHLY_UNITS
+        used = _units(user_jobs.filter(is_trial=False, created_at__gte=month_start))
+        limit_error = 'monthly_limit'
+    if used + units > limit:
+        return _error(
+            limit_error, status.HTTP_429_TOO_MANY_REQUESTS,
+            extra={'limit': limit, 'used': used, 'units': units},
+        )
 
     job = AudioJob.objects.create(
-        app_user_id=app_user_id, request_id=request_id, input_sec=input_sec
+        app_user_id=app_user_id, request_id=request_id, input_sec=input_sec,
+        units=units, is_trial=is_trial, ip=ip,
     )
     try:
         job.production_uuid = auphonic.start_production(
@@ -143,14 +179,15 @@ def enhance(request):
 
     job.save(update_fields=['production_uuid'])
     logger.info(
-        "audio.enhance started: job=%s app_user_id=%s input_sec=%.2f",
-        job.id, app_user_id, input_sec,
+        "audio.enhance started: job=%s app_user_id=%s input_sec=%.2f units=%s trial=%s",
+        job.id, app_user_id, input_sec, units, is_trial,
     )
     return Response(
         {
             'id': str(job.id),
             'status': job.status,
-            'remaining_sec': max(0, math.floor(user_limit_sec - user_today - billed_sec)),
+            'limit': limit,
+            'remaining': max(0, limit - used - units),
         },
         status=status.HTTP_201_CREATED,
     )
@@ -276,15 +313,8 @@ def _delete_at_auphonic(job: AudioJob) -> None:
     job.save(update_fields=['deleted_at'])
 
 
-def _billed_sec(queryset) -> float:
-    """Seconds Auphonic bills for these jobs. Failed productions are free."""
-    total = (
-        queryset.exclude(status='error')
-        .aggregate(total=Sum(Greatest('input_sec', Value(float(MIN_BILLED_SEC)),
-                                      output_field=FloatField())))
-        ['total']
-    )
-    return total or 0.0
+def _units(queryset) -> int:
+    return queryset.aggregate(total=Sum('units'))['total'] or 0
 
 
 def _job_payload(job: AudioJob) -> dict:

@@ -24,6 +24,15 @@ PRODUCTION_UUID = 'KKw7AxpLrDBQKLVnQCBtCh'
 DOWNLOAD_URL = f'https://auphonic.com/api/download/audio-result/{PRODUCTION_UUID}/out.m4a'
 
 
+def rc_trial():
+    return FakeResponse(200, {'subscriber': {
+        'entitlements': {'access': {
+            'expires_date': '2099-01-01T00:00:00Z', 'product_identifier': 'annual_trial',
+        }},
+        'subscriptions': {'annual_trial': {'period_type': 'trial'}},
+    }})
+
+
 def auphonic_ok(data=None):
     return FakeResponse(200, {'status_code': 200, 'error_code': None, 'data': data or {}})
 
@@ -41,8 +50,11 @@ def production(status_code, length=2.0, output_files=None):
     AUPHONIC_API_KEY='auphonic-test-key-not-real',
     AUDIO_ENHANCE_ENABLED=True,
     REVENUECAT_SECRET_API_KEY='rc-test-key-not-real',
-    AUDIO_ENHANCE_USER_DAILY_MINUTES=30,
-    AUDIO_ENHANCE_GLOBAL_DAILY_MINUTES=60,
+    AUDIO_ENHANCE_PAID_MONTHLY_UNITS=10,
+    AUDIO_ENHANCE_TRIAL_UNITS=3,
+    AUDIO_ENHANCE_IP_DAILY_UNITS=15,
+    AUDIO_ENHANCE_GLOBAL_DAILY_UNITS=15,
+    AUDIO_ENHANCE_GLOBAL_MONTHLY_UNITS=40,
 )
 class AudioEnhanceTestCase(TestCase):
 
@@ -107,31 +119,6 @@ class AudioEnhanceTestCase(TestCase):
             self.assertIs(algorithms[key], False, key)
         self.assertEqual(algorithms['cut_mode'], 'export_uncut_audio')
 
-    def test_remaining_counts_the_three_minute_minimum(self):
-        resp = self.upload()
-        self.assertEqual(resp.json()['remaining_sec'], 30 * 60 - 180)
-
-    def test_same_request_id_returns_the_same_job(self):
-        first = self.upload(request_id='attempt-1')
-        calls = self.auphonic.call_count
-        again = self.upload(request_id='attempt-1')
-
-        self.assertEqual(first.status_code, 201)
-        self.assertEqual(again.status_code, 200)
-        self.assertEqual(again.json()['id'], first.json()['id'])
-        self.assertEqual(self.auphonic.call_count, calls)
-        self.assertEqual(AudioJob.objects.count(), 1)
-
-    def test_failed_request_id_can_start_again(self):
-        AudioJob.objects.create(
-            app_user_id=PAID_UUID, request_id='attempt-1', input_sec=2, status='error'
-        )
-        self.assertEqual(self.upload(request_id='attempt-1').status_code, 201)
-
-    def test_request_id_is_per_user(self):
-        AudioJob.objects.create(app_user_id=OTHER_UUID, request_id='attempt-1', input_sec=2)
-        self.assertEqual(self.upload(request_id='attempt-1').status_code, 201)
-
     def test_invalid_user_id(self):
         self.assertEqual(self.upload(user_id='nope').status_code, 400)
         self.assertEqual(self.upload(user_id=None).status_code, 400)
@@ -164,23 +151,79 @@ class AudioEnhanceTestCase(TestCase):
         self.assertEqual(resp.json()['error'], 'subscription_required')
         self.auphonic.assert_not_called()
 
-    def test_user_daily_limit(self):
-        # 30 minutes a day, each job bills at least 3: the 11th is refused.
-        for _ in range(10):
-            AudioJob.objects.create(app_user_id=PAID_UUID, input_sec=60)
+    def test_revenuecat_down_refuses(self):
+        self.revenuecat.return_value = FakeResponse(500, {})
+        resp = self.upload()
+        self.assertEqual(resp.status_code, 502)
+        self.auphonic.assert_not_called()
+
+    # --- quotas ---------------------------------------------------------------
+
+    def _jobs(self, n, units=1, user=PAID_UUID, **fields):
+        for _ in range(n):
+            AudioJob.objects.create(app_user_id=user, input_sec=60, units=units, **fields)
+
+    def test_short_clip_is_one_unit_and_remaining_is_reported(self):
+        body = self.upload().json()
+        self.assertEqual(AudioJob.objects.get().units, 1)
+        self.assertEqual((body['limit'], body['remaining']), (10, 9))
+
+    def test_units_round_up_per_three_minutes(self):
+        with patch('audio.views.m4a_duration_sec', return_value=7 * 60):
+            self.upload()
+        self.assertEqual(AudioJob.objects.get().units, 3)
+
+    def test_paid_monthly_limit(self):
+        self._jobs(10)
         resp = self.upload()
         self.assertEqual(resp.status_code, 429)
-        self.assertEqual(resp.json()['error'], 'daily_limit')
+        self.assertEqual(resp.json()['error'], 'monthly_limit')
+        self.auphonic.assert_not_called()
 
-    def test_failed_jobs_and_yesterday_dont_count(self):
-        for _ in range(10):
-            AudioJob.objects.create(app_user_id=PAID_UUID, input_sec=60, status='error')
-        old = AudioJob.objects.create(app_user_id=PAID_UUID, input_sec=29 * 60)
-        AudioJob.objects.filter(id=old.id).update(created_at=timezone.now() - timedelta(days=2))
+    def test_a_long_clip_must_fit_in_what_is_left(self):
+        self._jobs(8)
+        with patch('audio.views.m4a_duration_sec', return_value=7 * 60):
+            self.assertEqual(self.upload().status_code, 429)
+
+    def test_failed_jobs_and_last_month_dont_count(self):
+        self._jobs(10, status='error')
+        old = AudioJob.objects.create(app_user_id=PAID_UUID, input_sec=60, units=10)
+        month_start = timezone.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        AudioJob.objects.filter(id=old.id).update(created_at=month_start - timedelta(days=1))
         self.assertEqual(self.upload().status_code, 201)
 
+    def test_trial_gets_its_own_small_allowance(self):
+        self.revenuecat.return_value = rc_trial()
+        for _ in range(3):
+            self.assertEqual(self.upload().status_code, 201)
+        resp = self.upload()
+        self.assertEqual(resp.status_code, 429)
+        self.assertEqual(resp.json()['error'], 'trial_limit')
+        self.assertTrue(all(job.is_trial for job in AudioJob.objects.all()))
+
+    def test_trial_use_does_not_eat_the_paid_month(self):
+        self._jobs(3, is_trial=True)
+        body = self.upload().json()
+        self.assertEqual(body['remaining'], 9)
+
+    def test_ip_daily_limit(self):
+        self._jobs(15, user=OTHER_UUID, ip='127.0.0.1')
+        resp = self.upload()
+        self.assertEqual(resp.status_code, 429)
+        self.assertEqual(resp.json()['error'], 'rate_limited')
+
     def test_global_daily_limit(self):
-        AudioJob.objects.create(app_user_id=OTHER_UUID, input_sec=59 * 60)
+        self._jobs(15, user=OTHER_UUID, ip='10.0.0.1')
+        resp = self.upload()
+        self.assertEqual(resp.status_code, 429)
+        self.assertEqual(resp.json()['error'], 'rate_limited')
+
+    def test_global_monthly_limit(self):
+        AudioJob.objects.create(app_user_id=OTHER_UUID, input_sec=60, units=40, ip='10.0.0.1')
+        old = AudioJob.objects.get()
+        yesterday = timezone.now() - timedelta(days=1)
+        if yesterday.month == timezone.now().month:
+            AudioJob.objects.filter(id=old.id).update(created_at=yesterday)
         resp = self.upload()
         self.assertEqual(resp.status_code, 429)
         self.assertEqual(resp.json()['error'], 'rate_limited')

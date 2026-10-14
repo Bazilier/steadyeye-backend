@@ -28,7 +28,10 @@ REVENUECAT_TIMEOUT_SECONDS = 5
 ENTITLEMENT_ID = 'access'
 CACHE_TTL = timedelta(minutes=10)
 
-__all__ = ['is_valid_app_user_id', 'is_paid_user', 'ENTITLEMENT_ID', 'CACHE_TTL']
+__all__ = [
+    'is_valid_app_user_id', 'is_paid_user', 'subscription_status',
+    'ENTITLEMENT_ID', 'CACHE_TTL',
+]
 
 
 def is_paid_user(app_user_id: str) -> bool:
@@ -81,11 +84,44 @@ def is_paid_user(app_user_id: str) -> bool:
     return is_paid
 
 
+def subscription_status(app_user_id: str) -> str | None:
+    """'paid', 'trial' or 'free', straight from RC; None if RC is down.
+
+    Uncached on purpose: for features that cost money per use, where a
+    trial gets a smaller allowance than a paid subscription, and where the
+    caller should refuse rather than guess when RC cannot be asked.
+    """
+    try:
+        subscriber = _fetch_subscriber(app_user_id)
+    except _RevenueCatUnavailable:
+        return None
+    if subscriber is None:
+        return 'free'
+    entitlement = (subscriber.get('entitlements') or {}).get(ENTITLEMENT_ID)
+    if not isinstance(entitlement, dict) or not _is_active(entitlement.get('expires_date')):
+        return 'free'
+    product = (subscriber.get('subscriptions') or {}).get(entitlement.get('product_identifier')) or {}
+    return 'trial' if product.get('period_type') == 'trial' else 'paid'
+
+
 class _RevenueCatUnavailable(Exception):
     """RC could not be reached or answered with something unusable."""
 
 
 def _fetch_from_revenuecat(app_user_id: str) -> bool:
+    subscriber = _fetch_subscriber(app_user_id)
+    if subscriber is None:
+        return False
+    entitlements = subscriber.get('entitlements') or {}
+    entitlement = entitlements.get(ENTITLEMENT_ID)
+    if not isinstance(entitlement, dict):
+        return False
+
+    return _is_active(entitlement.get('expires_date'))
+
+
+def _fetch_subscriber(app_user_id: str) -> dict | None:
+    """RC's `subscriber` object, or None for a user RC has never seen."""
     api_key = getattr(settings, 'REVENUECAT_SECRET_API_KEY', '') or ''
     if not api_key:
         logger.error("entitlement: REVENUECAT_SECRET_API_KEY is not configured")
@@ -106,7 +142,7 @@ def _fetch_from_revenuecat(app_user_id: str) -> bool:
     if resp.status_code == 404:
         # Subscriber unknown to RC — a fresh install that has never purchased.
         # A definite "free", not an outage, so it is not an error path.
-        return False
+        return None
 
     # 201: RC creates the subscriber record on a GET for an id it has not seen
     # before and answers 201 with the same body shape as 200. It is a normal
@@ -123,12 +159,7 @@ def _fetch_from_revenuecat(app_user_id: str) -> bool:
         logger.warning("entitlement: RC returned non-JSON for app_user_id=%s", app_user_id)
         raise _RevenueCatUnavailable()
 
-    entitlements = (body.get('subscriber') or {}).get('entitlements') or {}
-    entitlement = entitlements.get(ENTITLEMENT_ID)
-    if not isinstance(entitlement, dict):
-        return False
-
-    return _is_active(entitlement.get('expires_date'))
+    return body.get('subscriber') or {}
 
 
 def _is_active(expires_date) -> bool:

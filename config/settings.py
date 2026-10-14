@@ -179,10 +179,16 @@ AI_LOG_RETENTION_DAYS = env.int('AI_LOG_RETENTION_DAYS', default=90)
 # Processing settings are constants in audio/services/auphonic_client.py.
 AUPHONIC_API_KEY = env('AUPHONIC_API_KEY', default='')
 AUDIO_ENHANCE_ENABLED = env.bool('AUDIO_ENHANCE_ENABLED', default=True)  # kill switch
-# Quotas in billed minutes per UTC day. Auphonic bills input duration with
-# a 3-minute minimum per production, so a 1-minute clip counts as 3.
-AUDIO_ENHANCE_USER_DAILY_MINUTES = env.int('AUDIO_ENHANCE_USER_DAILY_MINUTES', default=30)
-AUDIO_ENHANCE_GLOBAL_DAILY_MINUTES = env.int('AUDIO_ENHANCE_GLOBAL_DAILY_MINUTES', default=60)
+# Quotas count "units": one per started 3 minutes of audio, which is how
+# Auphonic bills (3-minute minimum per production). A 40 s clip is 1 unit,
+# a 7-minute one 3. Months are UTC calendar months.
+AUDIO_ENHANCE_PAID_MONTHLY_UNITS = env.int('AUDIO_ENHANCE_PAID_MONTHLY_UNITS', default=10)
+# For the whole free trial, not per month.
+AUDIO_ENHANCE_TRIAL_UNITS = env.int('AUDIO_ENHANCE_TRIAL_UNITS', default=3)
+AUDIO_ENHANCE_IP_DAILY_UNITS = env.int('AUDIO_ENHANCE_IP_DAILY_UNITS', default=15)
+# Hard stops on the Auphonic bill, across all users.
+AUDIO_ENHANCE_GLOBAL_DAILY_UNITS = env.int('AUDIO_ENHANCE_GLOBAL_DAILY_UNITS', default=15)
+AUDIO_ENHANCE_GLOBAL_MONTHLY_UNITS = env.int('AUDIO_ENHANCE_GLOBAL_MONTHLY_UNITS', default=40)
 
 # Logging
 LOGGING = {
