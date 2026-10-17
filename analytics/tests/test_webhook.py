@@ -29,6 +29,7 @@ class RevenueCatWebhookTests(TestCase):
             'app_user_id': 'user-abc-12345',
             'product_id': 'com.bazilier.steadyeye.annual',
             'price_in_purchased_currency': 49.99,
+            'price': 49.99,
             'currency': 'USD',
             'country_code': 'US',
             'is_trial_conversion': False,
@@ -70,6 +71,15 @@ class RevenueCatWebhookTests(TestCase):
         self.assertEqual(event.country, 'US')
         self.assertFalse(event.is_renewal)
         self.assertEqual(event.raw_payload['api_version'], '1.0')
+
+    def test_price_usd_is_rc_converted_price_not_local_amount(self):
+        payload = self._event_payload(
+            price_in_purchased_currency=19.9, price=3.993, currency='BRL',
+        )
+        self._post(payload)
+        event = RcEvent.objects.get()
+        self.assertEqual(str(event.price_usd), '3.99')
+        self.assertEqual(event.currency, 'BRL')
 
     def test_idempotency_same_event_id_creates_one_row(self):
         first = self._post(self._event_payload())

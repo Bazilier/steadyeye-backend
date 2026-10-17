@@ -102,7 +102,9 @@ def revenuecat_webhook(request):
                 'app_user_id': event.get('app_user_id', ''),
                 'product_id': event.get('product_id'),
                 'country': event.get('country_code'),
-                'price_usd': event.get('price_in_purchased_currency'),
+                # `price` is RC's amount converted to USD; the local amount
+                # (`price_in_purchased_currency`) stays in raw_payload.
+                'price_usd': event.get('price'),
                 'currency': event.get('currency'),
                 'is_trial_conversion': event.get('is_trial_conversion', False),
                 'is_renewal': event_type == 'RENEWAL',
